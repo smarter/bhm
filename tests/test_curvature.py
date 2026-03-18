@@ -2,7 +2,13 @@ import jax
 import jax.flatten_util
 import jax.numpy as jnp
 
-from bhm.curvature import compute_block_ggn, compute_ggn, compute_hessian, compute_kfac
+from bhm.curvature import (
+    compute_block_ggn,
+    compute_ekfac,
+    compute_ggn,
+    compute_hessian,
+    compute_kfac,
+)
 from bhm.evaluate import approximation_error, per_sample_gradients, pseudo_inverse
 from bhm.model import MLP
 
@@ -117,6 +123,74 @@ def test_kfac_error_ge_block_ggn():
     bg_err = approximation_error(H, BG_inv, grads)
     kfac_err = approximation_error(H, K_inv, grads)
     assert kfac_err >= bg_err - 1e-3, f"K-FAC error ({kfac_err}) < B-GGN error ({bg_err})"
+
+
+def test_ekfac_symmetric_psd():
+    model, x, y = _make_tiny_setup()
+    E = compute_ekfac(model, x, y)
+    assert jnp.allclose(E, E.T, atol=1e-5), f"EK-FAC not symmetric"
+    eigenvalues = jnp.linalg.eigvalsh(E)
+    assert jnp.all(eigenvalues >= -1e-5), f"EK-FAC not PSD: min eigenvalue {jnp.min(eigenvalues)}"
+
+
+def test_ekfac_is_block_diagonal():
+    """EK-FAC should only have nonzero entries in per-layer diagonal blocks."""
+    model, x, y = _make_tiny_setup()
+    E = compute_ekfac(model, x, y)
+    from bhm.curvature import _get_layer_param_ranges
+
+    ranges = _get_layer_param_ranges(model)
+    for i, (s1, e1) in enumerate(ranges):
+        for j, (s2, e2) in enumerate(ranges):
+            if i != j:
+                assert jnp.allclose(
+                    E[s1:e1, s2:e2], 0.0, atol=1e-10
+                ), f"EK-FAC off-diagonal block [{s1}:{e1},{s2}:{e2}] not zero"
+
+
+def test_ekfac_reconstructs_from_factors():
+    """Verify EK-FAC block equals U diag(s*) U^T computed independently."""
+    model, x, y = _make_tiny_setup()
+    E = compute_ekfac(model, x, y)
+    from bhm.curvature import (
+        _backprop_preact_grads,
+        _forward_with_activations,
+        _get_layer_param_ranges,
+        _kfac_perm,
+    )
+
+    logits, a_bars, pre_acts = _forward_with_activations(model, x)
+    ds_list = _backprop_preact_grads(model, logits, y, pre_acts)
+    ranges = _get_layer_param_ranges(model)
+    N = x.shape[0]
+
+    for l, (start, end) in enumerate(ranges):
+        a_bar = a_bars[l]
+        ds = ds_list[l]
+        out_f = model.layers[l].weight.shape[0]
+        in_f = model.layers[l].weight.shape[1]
+
+        A = (a_bar.T @ a_bar) / N
+        S = (ds.T @ ds) / N
+        _, U_A = jnp.linalg.eigh(A)
+        _, U_S = jnp.linalg.eigh(S)
+        U = jnp.kron(U_S, U_A)
+        q = a_bar @ U_A
+        r = ds @ U_S
+        s_star = ((r**2).T @ (q**2) / N).ravel()
+
+        # Reconstruct EK-FAC block in augmented ordering
+        expected_aug = U @ jnp.diag(s_star) @ U.T
+        # Permute to ravel ordering
+        perm = _kfac_perm(out_f, in_f)
+        inv_perm = jnp.argsort(perm)
+        expected_ravel = expected_aug[jnp.ix_(inv_perm, inv_perm)]
+
+        E_block = E[start:end, start:end]
+        assert jnp.allclose(E_block, expected_ravel, atol=1e-4), (
+            f"Layer {l}: EK-FAC block doesn't match reconstruction, "
+            f"max diff = {jnp.max(jnp.abs(E_block - expected_ravel))}"
+        )
 
 
 def test_pseudo_inverse():

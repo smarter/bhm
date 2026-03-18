@@ -215,6 +215,64 @@ def compute_kfac(
     return (K + K.T) / 2
 
 
+def compute_ekfac(
+    model: MLP,
+    x: Float[Array, "N 64"],
+    y: Int[Array, " N"],
+) -> Float[Array, "D D"]:
+    """EK-FAC: Eigenvalue-corrected K-FAC.
+
+    Keeps K-FAC's Kronecker eigenbasis U = U_S ⊗ U_A but replaces the
+    eigenvalues with corrected values s_k* = E[(U^T g_l)_k^2], matching
+    the diagonal of the true Fisher/GGN in the Kronecker eigenbasis.
+    """
+    flat_params, _ = jax.flatten_util.ravel_pytree(model)
+    D = flat_params.shape[0]
+    N = x.shape[0]
+
+    logits, a_bars, pre_acts = _forward_with_activations(model, x)
+    ds_list = _backprop_preact_grads(model, logits, y, pre_acts)
+
+    ranges = _get_layer_param_ranges(model)
+    E = jnp.zeros((D, D))
+
+    for l, (start, end) in enumerate(ranges):
+        a_bar = a_bars[l]  # (N, in_l+1)
+        ds = ds_list[l]  # (N, out_l)
+
+        A = (a_bar.T @ a_bar) / N  # (in_l+1, in_l+1)
+        S = (ds.T @ ds) / N  # (out_l, out_l)
+
+        # Eigenbases of the K-FAC factors
+        _, U_A = jnp.linalg.eigh(A)  # (in_l+1, in_l+1)
+        _, U_S = jnp.linalg.eigh(S)  # (out_l, out_l)
+
+        # Rotate per-sample activations and gradients into the eigenbasis
+        q = a_bar @ U_A  # (N, in_l+1)
+        r = ds @ U_S  # (N, out_l)
+
+        # Corrected eigenvalues: s*[j, m] = (1/N) sum_i r[i,j]^2 * q[i,m]^2
+        # In the Kronecker eigenbasis ordering (S ⊗ A), the eigenvalue for
+        # index j*(in+1)+m is s*[j,m]
+        s_star = (r**2).T @ (q**2) / N  # (out_l, in_l+1)
+        s_star_flat = s_star.ravel()  # (out_l * (in_l+1),), C-order
+
+        # EK-FAC block = U diag(s*) U^T where U = U_S ⊗ U_A
+        U = jnp.kron(U_S, U_A)  # (out*(in+1), out*(in+1))
+        block_ekfac = U @ jnp.diag(s_star_flat) @ U.T
+
+        # Permute from augmented ordering to ravel_pytree ordering
+        in_f = model.layers[l].weight.shape[1]
+        out_f = model.layers[l].weight.shape[0]
+        perm = _kfac_perm(out_f, in_f)
+        inv_perm = jnp.argsort(perm)
+        block_ravel = block_ekfac[jnp.ix_(inv_perm, inv_perm)]
+
+        E = E.at[start:end, start:end].set(block_ravel)
+
+    return (E + E.T) / 2
+
+
 def compute_block_ggn(
     model: MLP,
     x: Float[Array, "N 64"],

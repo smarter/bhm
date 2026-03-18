@@ -11,15 +11,17 @@ COLORS = {
     "Hessian": (204 / 255, 57 / 255, 42 / 255),
     "GGN": (79 / 255, 155 / 255, 143 / 255),
     "B-GGN": (217 / 255, 116 / 255, 89 / 255),
+    "EK-FAC": (228 / 255, 197 / 255, 119 / 255),
     "K-FAC": (155 / 255, 106 / 255, 145 / 255),
 }
 
-METHODS = ["Hessian", "GGN", "B-GGN", "K-FAC"]
+METHODS = ["Hessian", "GGN", "B-GGN", "EK-FAC", "K-FAC"]
 
 METHOD_KEYS = {
     "Hessian": "hessian_error",
     "GGN": "ggn_error",
     "B-GGN": "block_ggn_error",
+    "EK-FAC": "ekfac_error",
     "K-FAC": "kfac_error",
 }
 
@@ -81,6 +83,7 @@ def collect_experiments() -> list[dict[str, object]]:
             flat["ggn_error"] = metrics_json.get("ggn_error")
             flat["block_ggn_error"] = metrics_json.get("block_ggn_error")
             flat["kfac_error"] = metrics_json.get("kfac_error")
+            flat["ekfac_error"] = metrics_json.get("ekfac_error")
             flat["train_loss"] = metrics_json.get("train_loss")
 
             if flat["hessian_error"] is not None:
@@ -127,11 +130,11 @@ def plot_approx_error(
     x_values = [r[x_key] for r in results]
     x_labels = [f"{title_var} {v}" for v in x_values]
 
-    fig, ax = plt.subplots(figsize=(5.5, 3.0))
+    fig, ax = plt.subplots(figsize=(7.0, 3.5))
 
     n_groups = len(x_values)
     n_methods = len(METHODS)
-    bar_width = 0.25
+    bar_width = 0.13
     group_width = n_methods * bar_width
     x_pos = np.arange(n_groups)
 
