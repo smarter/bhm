@@ -12,8 +12,7 @@ def _get_layer_param_ranges(model: MLP) -> list[tuple[int, int]]:
     ranges = []
     offset = 0
     for layer in model.layers:
-        assert layer.bias is not None
-        size = layer.weight.size + layer.bias.size
+        size = layer.weight.size
         ranges.append((offset, offset + size))
         offset += size
     return ranges
@@ -95,54 +94,30 @@ def compute_ggn(
     return (G + G.T) / 2
 
 
-def _kfac_perm(out_features: int, in_features: int) -> Float[Array, " D_layer"]:
-    """Permutation from K-FAC augmented-weight ordering to ravel_pytree ordering.
-
-    K-FAC operates on the augmented weight [W | b] of shape (out, in+1), vectorized
-    row-by-row: [W[0,:], b[0], W[1,:], b[1], ...].
-
-    ravel_pytree gives: [W.ravel(), b.ravel()] = [W[0,:], W[1,:], ..., b[0], b[1], ...].
-
-    Returns a permutation array P such that kfac_vec[i] corresponds to ravel_vec[P[i]].
-    """
-    perm = []
-    w_size = out_features * in_features
-    for j in range(out_features):
-        for k in range(in_features):
-            perm.append(j * in_features + k)
-        perm.append(w_size + j)
-    return jnp.array(perm)
-
-
 def _forward_with_activations(
     model: MLP, x: Float[Array, "N 64"]
 ) -> tuple[
     Float[Array, "N 10"],
-    list[Float[Array, "N _in_plus_1"]],
+    list[Float[Array, "N _in"]],
     list[Float[Array, "N _out"]],
 ]:
-    """Forward pass recording bias-augmented inputs and pre-activations per layer."""
-    N = x.shape[0]
-    a_bars: list[Float[Array, "N _in_plus_1"]] = []
+    """Forward pass recording layer inputs and pre-activations per layer."""
+    activations: list[Float[Array, "N _in"]] = []
     pre_acts: list[Float[Array, "N _out"]] = []
 
     h = x
     for layer in model.layers[:-1]:
-        assert layer.bias is not None
-        a_bar = jnp.concatenate([h, jnp.ones((N, 1))], axis=1)
-        a_bars.append(a_bar)
-        s = h @ layer.weight.T + layer.bias
+        activations.append(h)
+        s = h @ layer.weight.T
         pre_acts.append(s)
         h = jnp.tanh(s)
 
     last = model.layers[-1]
-    assert last.bias is not None
-    a_bar = jnp.concatenate([h, jnp.ones((N, 1))], axis=1)
-    a_bars.append(a_bar)
-    s = h @ last.weight.T + last.bias
+    activations.append(h)
+    s = h @ last.weight.T
     pre_acts.append(s)
 
-    return s, a_bars, pre_acts
+    return s, activations, pre_acts
 
 
 def _backprop_preact_grads(
@@ -180,37 +155,31 @@ def compute_kfac(
     """K-FAC: Kronecker-factored approximate curvature.
 
     For each layer l, approximates the GGN/Fisher block as A_{l-1} ⊗ S_l where:
-      A_{l-1} = (1/N) Σ ā_{l-1} ā_{l-1}^T  (input covariance, bias-augmented)
+      A_{l-1} = (1/N) Σ a_{l-1} a_{l-1}^T  (input covariance)
       S_l     = (1/N) Σ Ds_l Ds_l^T          (pre-activation gradient covariance)
+
+    With weight shape (out, in) and C-order flattening, the Kronecker product
+    is S ⊗ A (gradient factor first, then activation factor).
     """
     flat_params, _ = jax.flatten_util.ravel_pytree(model)
     D = flat_params.shape[0]
     N = x.shape[0]
 
-    logits, a_bars, pre_acts = _forward_with_activations(model, x)
+    logits, activations, pre_acts = _forward_with_activations(model, x)
     ds_list = _backprop_preact_grads(model, logits, y, pre_acts)
 
     ranges = _get_layer_param_ranges(model)
     K = jnp.zeros((D, D))
 
     for l, (start, end) in enumerate(ranges):
-        a_bar = a_bars[l]  # (N, in_l+1)
+        a = activations[l]  # (N, in_l)
         ds = ds_list[l]  # (N, out_l)
 
-        A = (a_bar.T @ a_bar) / N  # (in_l+1, in_l+1)
+        A = (a.T @ a) / N  # (in_l, in_l)
         S = (ds.T @ ds) / N  # (out_l, out_l)
 
-        # Kronecker product in C-order (row-major) vectorization: S ⊗ A
-        block_kfac = jnp.kron(S, A)  # (out*(in+1), out*(in+1))
-
-        # Permute from augmented ordering to ravel_pytree ordering
-        in_f = model.layers[l].weight.shape[1]
-        out_f = model.layers[l].weight.shape[0]
-        perm = _kfac_perm(out_f, in_f)
-        inv_perm = jnp.argsort(perm)
-        block_ravel = block_kfac[jnp.ix_(inv_perm, inv_perm)]
-
-        K = K.at[start:end, start:end].set(block_ravel)
+        # Kronecker product: S ⊗ A (matches C-order vec of (out, in) weight)
+        K = K.at[start:end, start:end].set(jnp.kron(S, A))
 
     return (K + K.T) / 2
 
@@ -230,45 +199,36 @@ def compute_ekfac(
     D = flat_params.shape[0]
     N = x.shape[0]
 
-    logits, a_bars, pre_acts = _forward_with_activations(model, x)
+    logits, activations, pre_acts = _forward_with_activations(model, x)
     ds_list = _backprop_preact_grads(model, logits, y, pre_acts)
 
     ranges = _get_layer_param_ranges(model)
     E = jnp.zeros((D, D))
 
     for l, (start, end) in enumerate(ranges):
-        a_bar = a_bars[l]  # (N, in_l+1)
+        a = activations[l]  # (N, in_l)
         ds = ds_list[l]  # (N, out_l)
 
-        A = (a_bar.T @ a_bar) / N  # (in_l+1, in_l+1)
+        A = (a.T @ a) / N  # (in_l, in_l)
         S = (ds.T @ ds) / N  # (out_l, out_l)
 
         # Eigenbases of the K-FAC factors
-        _, U_A = jnp.linalg.eigh(A)  # (in_l+1, in_l+1)
+        _, U_A = jnp.linalg.eigh(A)  # (in_l, in_l)
         _, U_S = jnp.linalg.eigh(S)  # (out_l, out_l)
 
         # Rotate per-sample activations and gradients into the eigenbasis
-        q = a_bar @ U_A  # (N, in_l+1)
+        q = a @ U_A  # (N, in_l)
         r = ds @ U_S  # (N, out_l)
 
         # Corrected eigenvalues: s*[j, m] = (1/N) sum_i r[i,j]^2 * q[i,m]^2
-        # In the Kronecker eigenbasis ordering (S ⊗ A), the eigenvalue for
-        # index j*(in+1)+m is s*[j,m]
-        s_star = (r**2).T @ (q**2) / N  # (out_l, in_l+1)
-        s_star_flat = s_star.ravel()  # (out_l * (in_l+1),), C-order
+        s_star = (r**2).T @ (q**2) / N  # (out_l, in_l)
+        s_star_flat = s_star.ravel()  # C-order
 
         # EK-FAC block = U diag(s*) U^T where U = U_S ⊗ U_A
-        U = jnp.kron(U_S, U_A)  # (out*(in+1), out*(in+1))
+        U = jnp.kron(U_S, U_A)
         block_ekfac = U @ jnp.diag(s_star_flat) @ U.T
 
-        # Permute from augmented ordering to ravel_pytree ordering
-        in_f = model.layers[l].weight.shape[1]
-        out_f = model.layers[l].weight.shape[0]
-        perm = _kfac_perm(out_f, in_f)
-        inv_perm = jnp.argsort(perm)
-        block_ravel = block_ekfac[jnp.ix_(inv_perm, inv_perm)]
-
-        E = E.at[start:end, start:end].set(block_ravel)
+        E = E.at[start:end, start:end].set(block_ekfac)
 
     return (E + E.T) / 2
 

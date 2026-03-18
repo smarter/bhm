@@ -11,12 +11,12 @@ class MLP(eqx.Module):
         keys = jax.random.split(key, depth + 1)
         self.layers = []
         # Input layer
-        self.layers.append(eqx.nn.Linear(64, width, key=keys[0]))
+        self.layers.append(eqx.nn.Linear(64, width, use_bias=False, key=keys[0]))
         # Hidden layers
         for i in range(1, depth):
-            self.layers.append(eqx.nn.Linear(width, width, key=keys[i]))
+            self.layers.append(eqx.nn.Linear(width, width, use_bias=False, key=keys[i]))
         # Output layer
-        self.layers.append(eqx.nn.Linear(width, 10, key=keys[depth]))
+        self.layers.append(eqx.nn.Linear(width, 10, use_bias=False, key=keys[depth]))
 
     def __call__(self, x: Float[Array, " 64"]) -> Float[Array, " 10"]:
         for layer in self.layers[:-1]:

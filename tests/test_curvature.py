@@ -57,7 +57,6 @@ def test_block_ggn_is_block_diagonal():
     model, x, y = _make_tiny_setup()
     G = compute_ggn(model, x, y, chunk_size=8)
     BG = compute_block_ggn(model, x, y, chunk_size=8)
-    # Diagonal blocks should match GGN
     from bhm.curvature import _get_layer_param_ranges
 
     ranges = _get_layer_param_ranges(model)
@@ -65,7 +64,6 @@ def test_block_ggn_is_block_diagonal():
         assert jnp.allclose(
             BG[start:end, start:end], G[start:end, start:end], atol=1e-5
         ), f"Block [{start}:{end}] doesn't match GGN diagonal"
-    # Off-diagonal blocks should be zero
     for i, (s1, e1) in enumerate(ranges):
         for j, (s2, e2) in enumerate(ranges):
             if i != j:
@@ -112,16 +110,24 @@ def test_kfac_is_block_diagonal():
 
 
 def test_kfac_error_ge_block_ggn():
-    """K-FAC error should be >= B-GGN error (it's a coarser approximation)."""
-    model, x, y = _make_tiny_setup()
-    H = compute_hessian(model, x, y)
-    BG = compute_block_ggn(model, x, y, chunk_size=8)
+    """K-FAC error should be >= B-GGN error when measured against the GGN.
+
+    Uses the GGN (not Hessian) as reference to isolate the Kronecker
+    factorization error from the Hessian-GGN residual.
+    """
+    key = jax.random.PRNGKey(7)
+    model = MLP(depth=3, width=8, key=key)
+    x = jax.random.normal(jax.random.PRNGKey(0), (64, 64))
+    y = jax.random.randint(jax.random.PRNGKey(1), (64,), 0, 10)
+
+    G = compute_ggn(model, x, y, chunk_size=16)
+    BG = compute_block_ggn(model, x, y, chunk_size=16)
     K = compute_kfac(model, x, y)
     grads = per_sample_gradients(model, x, y)
     BG_inv = pseudo_inverse(BG)
     K_inv = pseudo_inverse(K)
-    bg_err = approximation_error(H, BG_inv, grads)
-    kfac_err = approximation_error(H, K_inv, grads)
+    bg_err = approximation_error(G, BG_inv, grads)
+    kfac_err = approximation_error(G, K_inv, grads)
     assert kfac_err >= bg_err - 1e-3, f"K-FAC error ({kfac_err}) < B-GGN error ({bg_err})"
 
 
@@ -156,40 +162,32 @@ def test_ekfac_reconstructs_from_factors():
         _backprop_preact_grads,
         _forward_with_activations,
         _get_layer_param_ranges,
-        _kfac_perm,
     )
 
-    logits, a_bars, pre_acts = _forward_with_activations(model, x)
+    logits, activations, pre_acts = _forward_with_activations(model, x)
     ds_list = _backprop_preact_grads(model, logits, y, pre_acts)
     ranges = _get_layer_param_ranges(model)
     N = x.shape[0]
 
     for l, (start, end) in enumerate(ranges):
-        a_bar = a_bars[l]
+        a = activations[l]
         ds = ds_list[l]
-        out_f = model.layers[l].weight.shape[0]
-        in_f = model.layers[l].weight.shape[1]
 
-        A = (a_bar.T @ a_bar) / N
+        A = (a.T @ a) / N
         S = (ds.T @ ds) / N
         _, U_A = jnp.linalg.eigh(A)
         _, U_S = jnp.linalg.eigh(S)
         U = jnp.kron(U_S, U_A)
-        q = a_bar @ U_A
+        q = a @ U_A
         r = ds @ U_S
         s_star = ((r**2).T @ (q**2) / N).ravel()
 
-        # Reconstruct EK-FAC block in augmented ordering
-        expected_aug = U @ jnp.diag(s_star) @ U.T
-        # Permute to ravel ordering
-        perm = _kfac_perm(out_f, in_f)
-        inv_perm = jnp.argsort(perm)
-        expected_ravel = expected_aug[jnp.ix_(inv_perm, inv_perm)]
+        expected = U @ jnp.diag(s_star) @ U.T
 
         E_block = E[start:end, start:end]
-        assert jnp.allclose(E_block, expected_ravel, atol=1e-4), (
+        assert jnp.allclose(E_block, expected, atol=1e-4), (
             f"Layer {l}: EK-FAC block doesn't match reconstruction, "
-            f"max diff = {jnp.max(jnp.abs(E_block - expected_ravel))}"
+            f"max diff = {jnp.max(jnp.abs(E_block - expected))}"
         )
 
 
