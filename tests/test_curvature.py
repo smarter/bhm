@@ -14,8 +14,10 @@ from bhm.curvature import (
     compute_shampoo,
     compute_tkfac,
 )
+from bhm.data import load_digits_data
 from bhm.evaluate import approximation_error, per_sample_gradients, pseudo_inverse
 from bhm.model import MLP
+from bhm.train import train
 
 
 def _make_tiny_setup():
@@ -311,6 +313,57 @@ def test_shampoo_and_tkfac_share_eigenvectors():
             f"Block [{start}:{end}]: Shampoo and TKFAC don't commute, "
             f"max |[S,T]| = {jnp.max(jnp.abs(commutator))}"
         )
+
+
+def _make_trained_setup():
+    """Trained model on digits data for error ordering tests."""
+    data = load_digits_data(seed=0)
+    model = MLP(depth=3, width=8, key=jax.random.PRNGKey(0))
+    model = train(
+        model, data.x_train, data.y_train,
+        epochs=20, batch_size=32, lr=0.03,
+        key=jax.random.PRNGKey(1),
+    )
+    return model, data.x_train, data.y_train
+
+
+def test_eigenvalue_corrections_improve_shampoo():
+    """EShampoo should have lower error than Shampoo on a trained model.
+
+    Eigenvalue corrections replace outer-product eigenvalues with per-sample
+    corrected values, which matters when the model has learned structure.
+    Uses GGN as reference to isolate Kronecker factorization error.
+    """
+    model, x, y = _make_trained_setup()
+    G = compute_ggn(model, x, y, chunk_size=32)
+    grads = per_sample_gradients(model, x, y)
+
+    Sh_inv = pseudo_inverse(compute_shampoo(model, x, y))
+    ESh_inv = pseudo_inverse(compute_eshampoo(model, x, y))
+    sh_err = approximation_error(G, Sh_inv, grads)
+    esh_err = approximation_error(G, ESh_inv, grads)
+    assert esh_err < sh_err, (
+        f"EShampoo ({esh_err:.2f}) >= Shampoo ({sh_err:.2f})"
+    )
+
+
+def test_eigenvalue_corrections_improve_tkfac():
+    """ETKFAC should have lower error than TKFAC on a trained model.
+
+    Same reasoning as EShampoo vs Shampoo: eigenvalue corrections help
+    when the Kronecker outer-product eigenvalues are poor approximations.
+    """
+    model, x, y = _make_trained_setup()
+    G = compute_ggn(model, x, y, chunk_size=32)
+    grads = per_sample_gradients(model, x, y)
+
+    T_inv = pseudo_inverse(compute_tkfac(model, x, y))
+    ET_inv = pseudo_inverse(compute_etkfac(model, x, y))
+    t_err = approximation_error(G, T_inv, grads)
+    et_err = approximation_error(G, ET_inv, grads)
+    assert et_err < t_err, (
+        f"ETKFAC ({et_err:.2f}) >= TKFAC ({t_err:.2f})"
+    )
 
 
 def test_pseudo_inverse():
