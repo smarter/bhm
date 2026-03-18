@@ -1,10 +1,10 @@
 import json
 import subprocess
 import sys
-from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
+from dvclive.live import Live
 
 
 COLORS = {
@@ -70,7 +70,7 @@ def collect_experiments() -> list[dict[str, object]]:
             metrics = data.get("metrics", {})
 
             params_yaml = params.get("params.yaml", {}).get("data", {})
-            metrics_json = metrics.get("results/metrics.json", {}).get("data", {})
+            metrics_json = metrics.get("dvclive/metrics.json", {}).get("data", {})
 
             if not params_yaml or not metrics_json:
                 continue
@@ -79,11 +79,8 @@ def collect_experiments() -> list[dict[str, object]]:
             flat["experiment.depth"] = params_yaml.get("experiment", {}).get("depth")
             flat["experiment.width"] = params_yaml.get("experiment", {}).get("width")
             flat["experiment.epochs"] = params_yaml.get("experiment", {}).get("epochs")
-            flat["hessian_error"] = metrics_json.get("hessian_error")
-            flat["ggn_error"] = metrics_json.get("ggn_error")
-            flat["block_ggn_error"] = metrics_json.get("block_ggn_error")
-            flat["kfac_error"] = metrics_json.get("kfac_error")
-            flat["ekfac_error"] = metrics_json.get("ekfac_error")
+            for key in METHOD_KEYS.values():
+                flat[key] = metrics_json.get(key)
             flat["train_loss"] = metrics_json.get("train_loss")
 
             if flat["hessian_error"] is not None:
@@ -98,15 +95,14 @@ def filter_sweep(
 ) -> list[dict[str, object]]:
     sweep = SWEEPS[sweep_name]
     fixed = sweep["fixed"]
-    x_key = sweep["x_key"]
     x_values = sweep["x_values"]
+    x_key = sweep["x_key"]
 
     matching = []
     for exp in experiments:
         if all(exp.get(k) == v for k, v in fixed.items()):  # type: ignore[union-attr]
             matching.append(exp)
 
-    # Sort by x_key and deduplicate (keep first match per x_value)
     result = []
     for xv in x_values:  # type: ignore[union-attr]
         for exp in matching:
@@ -117,11 +113,10 @@ def filter_sweep(
     return result
 
 
-def plot_approx_error(
+def make_figure(
     results: list[dict[str, object]],
     sweep_name: str,
-    output_path: str,
-) -> None:
+) -> plt.Figure:  # type: ignore[name-defined]
     sweep = SWEEPS[sweep_name]
     x_key = str(sweep["x_key"])
     x_label = str(sweep["x_label"])
@@ -133,8 +128,8 @@ def plot_approx_error(
     fig, ax = plt.subplots(figsize=(7.0, 3.5))
 
     n_groups = len(x_values)
-    n_methods = len(METHODS)
     bar_width = 0.13
+    n_methods = len(METHODS)
     group_width = n_methods * bar_width
     x_pos = np.arange(n_groups)
 
@@ -161,14 +156,10 @@ def plot_approx_error(
     ax.set_title(f"Approximation Error vs. {x_label} (Digits)")
 
     fig.tight_layout()
-    fig.savefig(output_path, dpi=150, bbox_inches="tight")
-    plt.close(fig)
-    print(f"Saved {output_path}")
+    return fig
 
 
 def main() -> None:
-    Path("figures").mkdir(exist_ok=True)
-
     experiments = collect_experiments()
     if not experiments:
         print("No experiments found. Run experiments first with:", file=sys.stderr)
@@ -177,13 +168,16 @@ def main() -> None:
 
     print(f"Found {len(experiments)} experiment(s)")
 
-    for sweep_name in SWEEPS:
-        results = filter_sweep(experiments, sweep_name)
-        if not results:
-            print(f"  Skipping {sweep_name} sweep: no matching experiments")
-            continue
-        output = f"figures/approx_error_{sweep_name}.png"
-        plot_approx_error(results, sweep_name, output)
+    with Live(dir="dvclive_plots", save_dvc_exp=False, dvcyaml=False) as live:
+        for sweep_name in SWEEPS:
+            results = filter_sweep(experiments, sweep_name)
+            if not results:
+                print(f"  Skipping {sweep_name} sweep: no matching experiments")
+                continue
+            fig = make_figure(results, sweep_name)
+            live.log_image(f"approx_error_{sweep_name}.png", fig)
+            plt.close(fig)
+            print(f"  Saved approx_error_{sweep_name}.png")
 
 
 if __name__ == "__main__":

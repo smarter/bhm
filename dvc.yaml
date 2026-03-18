@@ -15,5 +15,8 @@ stages:
       - seed
       - chunk_size
     metrics:
-      - results/metrics.json:
+      - dvclive/metrics.json:
+          cache: false
+    plots:
+      - dvclive/plots/custom/approx_error.json:
           cache: false

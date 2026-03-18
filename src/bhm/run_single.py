@@ -1,6 +1,4 @@
-import json
-import sys
-
+from dvclive.live import Live
 from omegaconf import OmegaConf
 
 from bhm.experiment import ExperimentConfig, run_experiment
@@ -21,19 +19,31 @@ def main() -> None:
 
     result = run_experiment(config)
 
-    metrics = {
-        "hessian_error": result.hessian_error,
-        "ggn_error": result.ggn_error,
-        "block_ggn_error": result.block_ggn_error,
-        "kfac_error": result.kfac_error,
-        "ekfac_error": result.ekfac_error,
-        "train_loss": result.train_loss,
-        "num_params": result.num_params,
-    }
+    with Live(save_dvc_exp=False, dvcyaml=False) as live:
+        live.log_metric("hessian_error", result.hessian_error, plot=False)
+        live.log_metric("ggn_error", result.ggn_error, plot=False)
+        live.log_metric("block_ggn_error", result.block_ggn_error, plot=False)
+        live.log_metric("ekfac_error", result.ekfac_error, plot=False)
+        live.log_metric("kfac_error", result.kfac_error, plot=False)
+        live.log_metric("train_loss", result.train_loss, plot=False)
+        live.log_metric("num_params", result.num_params, plot=False)
 
-    with open("results/metrics.json", "w") as f:
-        json.dump(metrics, f, indent=2)
-    print(f"Results saved to results/metrics.json", file=sys.stderr)
+        live.log_plot(
+            "approx_error",
+            [
+                {"method": "Hessian", "approx_error": result.hessian_error},
+                {"method": "GGN", "approx_error": result.ggn_error},
+                {"method": "B-GGN", "approx_error": result.block_ggn_error},
+                {"method": "EK-FAC", "approx_error": result.ekfac_error},
+                {"method": "K-FAC", "approx_error": result.kfac_error},
+            ],
+            x="method",
+            y="approx_error",
+            template="bar_horizontal",
+            title="Approximation Error by Method",
+            x_label="Approximation Error",
+            y_label="Method",
+        )
 
 
 if __name__ == "__main__":
