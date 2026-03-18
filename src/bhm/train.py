@@ -1,4 +1,7 @@
+from __future__ import annotations
+
 import math
+from typing import TYPE_CHECKING
 
 import equinox as eqx
 import jax
@@ -8,6 +11,9 @@ from jaxtyping import Array, Float, Int, PRNGKeyArray
 
 from bhm.model import MLP
 
+if TYPE_CHECKING:
+    from dvclive.live import Live
+
 
 def cross_entropy_loss(
     model: MLP, x: Float[Array, "N 64"], y: Int[Array, " N"]
@@ -15,6 +21,12 @@ def cross_entropy_loss(
     logits = jax.vmap(model)(x)
     log_probs = jax.nn.log_softmax(logits, axis=-1)
     return -jnp.mean(jnp.sum(jax.nn.one_hot(y, 10) * log_probs, axis=-1))
+
+
+def accuracy(model: MLP, x: Float[Array, "N 64"], y: Int[Array, " N"]) -> float:
+    logits = jax.vmap(model)(x)
+    preds = jnp.argmax(logits, axis=-1)
+    return float(jnp.mean(preds == y))
 
 
 def train(
@@ -26,6 +38,9 @@ def train(
     batch_size: int = 32,
     lr: float = 0.03,
     key: PRNGKeyArray,
+    x_test: Float[Array, "M 64"] | None = None,
+    y_test: Int[Array, " M"] | None = None,
+    live: Live | None = None,
 ) -> MLP:
     n = x_train.shape[0]
     steps_per_epoch = math.ceil(n / batch_size)
@@ -49,6 +64,8 @@ def train(
         model = eqx.apply_updates(model, updates)
         return model, opt_state, loss
 
+    log_interval = max(1, epochs // 100)
+
     for epoch in range(epochs):
         key, shuffle_key = jax.random.split(key)
         perm = jax.random.permutation(shuffle_key, n)
@@ -60,8 +77,20 @@ def train(
             y_batch = y_shuffled[i : i + batch_size]
             model, opt_state, loss = step(model, opt_state, x_batch, y_batch)
 
-        if (epoch + 1) % max(1, epochs // 10) == 0 or epoch == 0:
-            full_loss = cross_entropy_loss(model, x_train, y_train)
-            print(f"  Epoch {epoch + 1}/{epochs}, loss: {full_loss:.4f}")
+        if (epoch + 1) % log_interval == 0 or epoch == 0 or epoch == epochs - 1:
+            train_loss = float(cross_entropy_loss(model, x_train, y_train))
+            train_acc = accuracy(model, x_train, y_train)
+
+            if live is not None:
+                live.log_metric("train/loss", train_loss)
+                live.log_metric("train/accuracy", train_acc)
+                if x_test is not None and y_test is not None:
+                    test_loss = float(cross_entropy_loss(model, x_test, y_test))
+                    test_acc = accuracy(model, x_test, y_test)
+                    live.log_metric("test/loss", test_loss)
+                    live.log_metric("test/accuracy", test_acc)
+                live.next_step()
+
+            print(f"  Epoch {epoch + 1}/{epochs}, loss: {train_loss:.4f}, acc: {train_acc:.4f}")
 
     return model

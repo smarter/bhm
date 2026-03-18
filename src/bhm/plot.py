@@ -70,7 +70,7 @@ def collect_experiments() -> list[dict[str, object]]:
             metrics = data.get("metrics", {})
 
             params_yaml = params.get("params.yaml", {}).get("data", {})
-            metrics_json = metrics.get("dvclive/metrics.json", {}).get("data", {})
+            metrics_json = metrics.get("dvclive/evaluate/metrics.json", {}).get("data", {})
 
             if not params_yaml or not metrics_json:
                 continue

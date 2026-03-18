@@ -1,11 +1,8 @@
 stages:
-  experiment:
-    cmd: python -m bhm.run_single
+  train:
+    cmd: python -m bhm.run_train
     deps:
-      - src/bhm/run_single.py
-      - src/bhm/experiment.py
-      - src/bhm/curvature.py
-      - src/bhm/evaluate.py
+      - src/bhm/run_train.py
       - src/bhm/train.py
       - src/bhm/model.py
       - src/bhm/data.py
@@ -13,10 +10,31 @@ stages:
       - experiment
       - train
       - seed
-      - chunk_size
+    outs:
+      - models/model.eqx
     metrics:
-      - dvclive/metrics.json:
+      - dvclive/train/metrics.json:
           cache: false
     plots:
-      - dvclive/plots/custom/approx_error.json:
+      - dvclive/train/plots/metrics:
+          cache: false
+
+  evaluate:
+    cmd: python -m bhm.run_evaluate
+    deps:
+      - src/bhm/run_evaluate.py
+      - src/bhm/curvature.py
+      - src/bhm/evaluate.py
+      - src/bhm/model.py
+      - src/bhm/data.py
+      - models/model.eqx
+    params:
+      - experiment
+      - seed
+      - chunk_size
+    metrics:
+      - dvclive/evaluate/metrics.json:
+          cache: false
+    plots:
+      - dvclive/evaluate/plots/custom/approx_error.json:
           cache: false
