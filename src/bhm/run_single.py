@@ -25,6 +25,7 @@ def main() -> None:
         "hessian_error": result.hessian_error,
         "ggn_error": result.ggn_error,
         "block_ggn_error": result.block_ggn_error,
+        "kfac_error": result.kfac_error,
         "train_loss": result.train_loss,
         "num_params": result.num_params,
     }

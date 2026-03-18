@@ -2,7 +2,7 @@ import jax
 import jax.flatten_util
 import jax.numpy as jnp
 
-from bhm.curvature import compute_block_ggn, compute_ggn, compute_hessian
+from bhm.curvature import compute_block_ggn, compute_ggn, compute_hessian, compute_kfac
 from bhm.evaluate import approximation_error, per_sample_gradients, pseudo_inverse
 from bhm.model import MLP
 
@@ -80,6 +80,43 @@ def test_block_ggn_error_between_ggn_and_kfac():
     ggn_err = approximation_error(H, G_inv, grads)
     bg_err = approximation_error(H, BG_inv, grads)
     assert bg_err >= ggn_err - 1e-4, f"B-GGN error ({bg_err}) < GGN error ({ggn_err})"
+
+
+def test_kfac_symmetric_psd():
+    model, x, y = _make_tiny_setup()
+    K = compute_kfac(model, x, y)
+    assert jnp.allclose(K, K.T, atol=1e-5), f"K-FAC not symmetric"
+    eigenvalues = jnp.linalg.eigvalsh(K)
+    assert jnp.all(eigenvalues >= -1e-5), f"K-FAC not PSD: min eigenvalue {jnp.min(eigenvalues)}"
+
+
+def test_kfac_is_block_diagonal():
+    """K-FAC should only have nonzero entries in per-layer diagonal blocks."""
+    model, x, y = _make_tiny_setup()
+    K = compute_kfac(model, x, y)
+    from bhm.curvature import _get_layer_param_ranges
+
+    ranges = _get_layer_param_ranges(model)
+    for i, (s1, e1) in enumerate(ranges):
+        for j, (s2, e2) in enumerate(ranges):
+            if i != j:
+                assert jnp.allclose(
+                    K[s1:e1, s2:e2], 0.0, atol=1e-10
+                ), f"K-FAC off-diagonal block [{s1}:{e1},{s2}:{e2}] not zero"
+
+
+def test_kfac_error_ge_block_ggn():
+    """K-FAC error should be >= B-GGN error (it's a coarser approximation)."""
+    model, x, y = _make_tiny_setup()
+    H = compute_hessian(model, x, y)
+    BG = compute_block_ggn(model, x, y, chunk_size=8)
+    K = compute_kfac(model, x, y)
+    grads = per_sample_gradients(model, x, y)
+    BG_inv = pseudo_inverse(BG)
+    K_inv = pseudo_inverse(K)
+    bg_err = approximation_error(H, BG_inv, grads)
+    kfac_err = approximation_error(H, K_inv, grads)
+    assert kfac_err >= bg_err - 1e-3, f"K-FAC error ({kfac_err}) < B-GGN error ({bg_err})"
 
 
 def test_pseudo_inverse():

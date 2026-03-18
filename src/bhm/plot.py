@@ -11,14 +11,16 @@ COLORS = {
     "Hessian": (204 / 255, 57 / 255, 42 / 255),
     "GGN": (79 / 255, 155 / 255, 143 / 255),
     "B-GGN": (217 / 255, 116 / 255, 89 / 255),
+    "K-FAC": (155 / 255, 106 / 255, 145 / 255),
 }
 
-METHODS = ["Hessian", "GGN", "B-GGN"]
+METHODS = ["Hessian", "GGN", "B-GGN", "K-FAC"]
 
 METHOD_KEYS = {
     "Hessian": "hessian_error",
     "GGN": "ggn_error",
     "B-GGN": "block_ggn_error",
+    "K-FAC": "kfac_error",
 }
 
 SWEEPS: dict[str, dict[str, object]] = {
@@ -78,6 +80,7 @@ def collect_experiments() -> list[dict[str, object]]:
             flat["hessian_error"] = metrics_json.get("hessian_error")
             flat["ggn_error"] = metrics_json.get("ggn_error")
             flat["block_ggn_error"] = metrics_json.get("block_ggn_error")
+            flat["kfac_error"] = metrics_json.get("kfac_error")
             flat["train_loss"] = metrics_json.get("train_loss")
 
             if flat["hessian_error"] is not None:
