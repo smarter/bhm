@@ -206,105 +206,111 @@ def test_ekfac_reconstructs_from_factors():
         )
 
 
-def test_shampoo_symmetric_psd():
+def test_shampoo_a_factor_unit_trace():
+    """Shampoo's A factor should be trace-normalised per layer."""
     model, x, y = _make_tiny_setup()
+    from bhm.curvature import _get_layer_param_ranges, _shampoo_factors
+
+    _, _, _, _, layer_factors = _shampoo_factors(model, x, y)
     S = compute_shampoo(model, x, y)
-    assert jnp.allclose(S, S.T, atol=1e-5), f"Shampoo not symmetric"
-    eigenvalues = jnp.linalg.eigvalsh(S)
-    assert jnp.all(eigenvalues >= -1e-5), f"Shampoo not PSD: min eigenvalue {jnp.min(eigenvalues)}"
+    ranges = _get_layer_param_ranges(model)
+
+    for (start, end), (A_tilde, S_tilde, _) in zip(ranges, layer_factors):
+        block = S[start:end, start:end]
+        d_in = A_tilde.shape[0]
+        d_out = S_tilde.shape[0]
+        # Shampoo block = S_tilde ⊗ (A_tilde / tr(A_tilde))
+        # Reconstruct A factor from the block: for Kronecker S⊗A, the (0,0)
+        # d_in×d_in subblock is S[0,0]*A. So A ∝ block[:d_in, :d_in].
+        A_recovered = block[:d_in, :d_in]
+        # If A is trace-normalised, tr(A_recovered) should equal S_tilde[0,0]
+        # (since the subblock is S[0,0]*A and tr(A)=1).
+        # Simpler: just check that S_tilde ⊗ (A_tilde/tr(A_tilde)) == block.
+        A_norm = A_tilde / jnp.trace(A_tilde)
+        expected = jnp.kron(S_tilde, A_norm)
+        assert jnp.allclose(block, expected, atol=1e-4), (
+            f"Shampoo block doesn't match S_tilde ⊗ (A_tilde/tr(A_tilde))"
+        )
 
 
-def test_shampoo_is_block_diagonal():
+def test_tkfac_trace_matches_ggn_block():
+    """TKFAC's defining property: tr(TKFAC block) == tr(true GGN block) per layer."""
     model, x, y = _make_tiny_setup()
-    S = compute_shampoo(model, x, y)
+    G = compute_ggn(model, x, y, chunk_size=8)
+    T = compute_tkfac(model, x, y)
     from bhm.curvature import _get_layer_param_ranges
 
     ranges = _get_layer_param_ranges(model)
-    for i, (s1, e1) in enumerate(ranges):
-        for j, (s2, e2) in enumerate(ranges):
-            if i != j:
-                assert jnp.allclose(
-                    S[s1:e1, s2:e2], 0.0, atol=1e-10
-                ), f"Shampoo off-diagonal block [{s1}:{e1},{s2}:{e2}] not zero"
+    for start, end in ranges:
+        ggn_trace = jnp.trace(G[start:end, start:end])
+        tkfac_trace = jnp.trace(T[start:end, start:end])
+        assert jnp.allclose(tkfac_trace, ggn_trace, rtol=0.05), (
+            f"Block [{start}:{end}]: TKFAC trace {tkfac_trace:.4f} != "
+            f"GGN trace {ggn_trace:.4f}"
+        )
 
 
-def test_shampoo_differs_from_kfac():
-    """Shampoo's per-sample reweighting should make it differ from K-FAC."""
+def test_tkfac_reconstructs_from_shampoo_factors():
+    """TKFAC should equal delta * (A_tilde/tr(A_tilde)) ⊗ (S_tilde/tr(S_tilde))."""
     model, x, y = _make_tiny_setup()
-    S = compute_shampoo(model, x, y)
-    K = compute_kfac(model, x, y)
-    diff = jnp.max(jnp.abs(S - K))
-    assert diff > 1e-6, f"Shampoo and K-FAC are identical (diff={diff})"
+    T = compute_tkfac(model, x, y)
+    from bhm.curvature import _get_layer_param_ranges, _shampoo_factors
+
+    _, _, _, _, layer_factors = _shampoo_factors(model, x, y)
+    ranges = _get_layer_param_ranges(model)
+
+    for (start, end), (A_tilde, S_tilde, delta_l) in zip(ranges, layer_factors):
+        Phi = A_tilde / jnp.trace(A_tilde)
+        Psi = S_tilde / jnp.trace(S_tilde)
+        expected = delta_l * jnp.kron(Psi, Phi)
+        T_block = T[start:end, start:end]
+        assert jnp.allclose(T_block, expected, atol=1e-4), (
+            f"Block [{start}:{end}]: TKFAC doesn't match delta * Phi ⊗ Psi, "
+            f"max diff = {jnp.max(jnp.abs(T_block - expected))}"
+        )
 
 
-def test_eshampoo_symmetric_psd():
+def test_eshampoo_equals_etkfac():
+    """EShampoo and ETKFAC should be identical.
+
+    Both use eigenvalue corrections in the Shampoo eigenbasis.
+    Shampoo normalises only A while TKFAC normalises both A and S,
+    but scalar normalisation preserves eigenvectors, so the eigenbases
+    are the same. The eigenvalue corrections depend only on the
+    eigenbasis and per-sample data, so the results must match.
+    """
     model, x, y = _make_tiny_setup()
     ES = compute_eshampoo(model, x, y)
-    assert jnp.allclose(ES, ES.T, atol=1e-5), f"EShampoo not symmetric"
-    eigenvalues = jnp.linalg.eigvalsh(ES)
-    assert jnp.all(eigenvalues >= -1e-5), f"EShampoo not PSD: min eigenvalue {jnp.min(eigenvalues)}"
+    ET = compute_etkfac(model, x, y)
+    assert jnp.allclose(ES, ET, atol=1e-4), (
+        f"EShampoo != ETKFAC: max diff = {jnp.max(jnp.abs(ES - ET))}"
+    )
 
 
-def test_eshampoo_is_block_diagonal():
+def test_shampoo_and_tkfac_share_eigenvectors():
+    """Shampoo and TKFAC should have the same eigenvectors per layer.
+
+    Both use Shampoo factors (A_tilde, S_tilde). TKFAC normalises
+    both to unit trace; Shampoo normalises only A. Since scalar
+    normalisation preserves eigenvectors, the Kronecker eigenbases
+    should be the same.
+    """
     model, x, y = _make_tiny_setup()
-    ES = compute_eshampoo(model, x, y)
-    from bhm.curvature import _get_layer_param_ranges
-
-    ranges = _get_layer_param_ranges(model)
-    for i, (s1, e1) in enumerate(ranges):
-        for j, (s2, e2) in enumerate(ranges):
-            if i != j:
-                assert jnp.allclose(
-                    ES[s1:e1, s2:e2], 0.0, atol=1e-10
-                ), f"EShampoo off-diagonal block [{s1}:{e1},{s2}:{e2}] not zero"
-
-
-def test_tkfac_symmetric_psd():
-    model, x, y = _make_tiny_setup()
-    T = compute_tkfac(model, x, y)
-    assert jnp.allclose(T, T.T, atol=1e-5), f"TKFAC not symmetric"
-    eigenvalues = jnp.linalg.eigvalsh(T)
-    assert jnp.all(eigenvalues >= -1e-5), f"TKFAC not PSD: min eigenvalue {jnp.min(eigenvalues)}"
-
-
-def test_tkfac_is_block_diagonal():
-    model, x, y = _make_tiny_setup()
+    S = compute_shampoo(model, x, y)
     T = compute_tkfac(model, x, y)
     from bhm.curvature import _get_layer_param_ranges
 
     ranges = _get_layer_param_ranges(model)
-    for i, (s1, e1) in enumerate(ranges):
-        for j, (s2, e2) in enumerate(ranges):
-            if i != j:
-                assert jnp.allclose(
-                    T[s1:e1, s2:e2], 0.0, atol=1e-10
-                ), f"TKFAC off-diagonal block [{s1}:{e1},{s2}:{e2}] not zero"
-
-
-def test_tkfac_differs_from_kfac():
-    """TKFAC uses per-sample reweighted factors, so it should differ from K-FAC."""
-    model, x, y = _make_tiny_setup()
-    T = compute_tkfac(model, x, y)
-    K = compute_kfac(model, x, y)
-    diff = jnp.max(jnp.abs(T - K))
-    assert diff > 1e-6, f"TKFAC and K-FAC are identical (diff={diff})"
-
-
-def test_etkfac_symmetric_psd():
-    model, x, y = _make_tiny_setup()
-    ET = compute_etkfac(model, x, y)
-    assert jnp.allclose(ET, ET.T, atol=1e-5), f"ETKFAC not symmetric"
-    eigenvalues = jnp.linalg.eigvalsh(ET)
-    assert jnp.all(eigenvalues >= -1e-5), f"ETKFAC not PSD: min eigenvalue {jnp.min(eigenvalues)}"
-
-
-def test_etkfac_differs_from_ekfac():
-    """ETKFAC uses a different eigenbasis (reweighted factors) from EK-FAC."""
-    model, x, y = _make_tiny_setup()
-    ET = compute_etkfac(model, x, y)
-    EK = compute_ekfac(model, x, y)
-    diff = jnp.max(jnp.abs(ET - EK))
-    assert diff > 1e-6, f"ETKFAC and EK-FAC are identical (diff={diff})"
+    for start, end in ranges:
+        S_block = S[start:end, start:end]
+        T_block = T[start:end, start:end]
+        # Both have form U diag(lambda) U^T with the same U.
+        # If eigenvectors are the same, S_block and T_block commute.
+        commutator = S_block @ T_block - T_block @ S_block
+        assert jnp.allclose(commutator, 0.0, atol=1e-4), (
+            f"Block [{start}:{end}]: Shampoo and TKFAC don't commute, "
+            f"max |[S,T]| = {jnp.max(jnp.abs(commutator))}"
+        )
 
 
 def test_pseudo_inverse():
