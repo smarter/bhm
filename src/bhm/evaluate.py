@@ -12,7 +12,9 @@ def pseudo_inverse(
 ) -> Float[Array, "D D"]:
     # Use numpy float64 eigendecomposition for numerical stability
     eigenvalues, eigenvectors = np.linalg.eigh(np.asarray(M, dtype=np.float64))
-    inv_eigenvalues = np.where(np.abs(eigenvalues) > eps, 1.0 / eigenvalues, 0.0)
+    mask = np.abs(eigenvalues) > eps
+    inv_eigenvalues = np.zeros_like(eigenvalues)
+    inv_eigenvalues[mask] = 1.0 / eigenvalues[mask]
     result = eigenvectors @ np.diag(inv_eigenvalues) @ eigenvectors.T
     return jnp.array(result, dtype=jnp.float32)
 
