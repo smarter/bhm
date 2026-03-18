@@ -281,24 +281,13 @@ def test_tkfac_is_block_diagonal():
                 ), f"TKFAC off-diagonal block [{s1}:{e1},{s2}:{e2}] not zero"
 
 
-def test_tkfac_proportional_to_kfac():
-    """TKFAC blocks should equal K-FAC blocks scaled by tr(A)*tr(S) per layer."""
+def test_tkfac_differs_from_kfac():
+    """TKFAC uses per-sample reweighted factors, so it should differ from K-FAC."""
     model, x, y = _make_tiny_setup()
     T = compute_tkfac(model, x, y)
     K = compute_kfac(model, x, y)
-    from bhm.curvature import _get_layer_param_ranges
-
-    ranges = _get_layer_param_ranges(model)
-    for start, end in ranges:
-        T_block = T[start:end, start:end]
-        K_block = K[start:end, start:end]
-        # Find the ratio: T_block = scale * K_block
-        # Use Frobenius norm ratio since element-wise may have zeros
-        scale = jnp.sum(T_block * K_block) / jnp.sum(K_block * K_block)
-        assert jnp.allclose(T_block, scale * K_block, atol=1e-4), (
-            f"TKFAC block [{start}:{end}] not proportional to K-FAC"
-        )
-        assert scale > 0, f"Scale should be positive, got {scale}"
+    diff = jnp.max(jnp.abs(T - K))
+    assert diff > 1e-6, f"TKFAC and K-FAC are identical (diff={diff})"
 
 
 def test_etkfac_symmetric_psd():
@@ -309,14 +298,13 @@ def test_etkfac_symmetric_psd():
     assert jnp.all(eigenvalues >= -1e-5), f"ETKFAC not PSD: min eigenvalue {jnp.min(eigenvalues)}"
 
 
-def test_etkfac_equals_ekfac():
-    """ETKFAC is mathematically equivalent to EK-FAC (trace scaling preserves eigenvectors)."""
+def test_etkfac_differs_from_ekfac():
+    """ETKFAC uses a different eigenbasis (reweighted factors) from EK-FAC."""
     model, x, y = _make_tiny_setup()
     ET = compute_etkfac(model, x, y)
     EK = compute_ekfac(model, x, y)
-    assert jnp.allclose(ET, EK, atol=1e-4), (
-        f"ETKFAC differs from EK-FAC: max diff = {jnp.max(jnp.abs(ET - EK))}"
-    )
+    diff = jnp.max(jnp.abs(ET - EK))
+    assert diff > 1e-6, f"ETKFAC and EK-FAC are identical (diff={diff})"
 
 
 def test_pseudo_inverse():

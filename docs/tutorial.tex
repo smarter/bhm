@@ -339,37 +339,50 @@ $\hat{\mathbf{G}}_\ell^{\text{ESh}}
 
 \section{TKFAC and ETKFAC}
 
-\subsection{TKFAC (Trace-normalised K-FAC)}
+\subsection{TKFAC (Trace-restricted K-FAC)}
 
-TKFAC scales each K-FAC factor by the trace of the other:
+TKFAC (Gao \& Liu, 2020) uses the same per-sample reweighted factors
+as Shampoo but normalises each to unit trace and scales by a
+coefficient that matches the trace of the true Fisher block.
+The decomposition is
 \[
-  \mathbf{A}_\ell^{T} = \mathbf{A}_\ell \cdot \tr(\mathbf{S}_\ell),
-  \qquad
-  \mathbf{S}_\ell^{T} = \mathbf{S}_\ell \cdot \tr(\mathbf{A}_\ell).
+  \hat{\mathbf{F}}_\ell
+  = \delta_\ell \;\Phi_\ell \kron \Psi_\ell
 \]
-Since scalar multiplication preserves eigenvectors, the TKFAC
-eigenbasis is identical to K-FAC's.  The net effect is a uniform
-scaling of all K-FAC eigenvalues:
-\[
-  \lambda_{jm}^{T}
-  = \tr(\mathbf{A}_\ell)\;\tr(\mathbf{S}_\ell)\;
-    \lambda_{\mathbf{S},j}\;\lambda_{\mathbf{A},m}.
-\]
-This can better match the overall scale of the true curvature block
-without changing its directional structure.
+where
+\begin{align*}
+  \Phi_\ell
+  &= \frac{\tilde{\mathbf{A}}_\ell}{\tr(\tilde{\mathbf{A}}_\ell)}, \qquad
+  \Psi_\ell
+  = \frac{\tilde{\mathbf{S}}_\ell}{\tr(\tilde{\mathbf{S}}_\ell)}, \\[4pt]
+  \delta_\ell
+  &= \frac{1}{N}\sum_{i=1}^{N}
+    \|a_i\|^2\;\tr(\mathbf{S}_i),
+\end{align*}
+with $\tilde{\mathbf{A}}_\ell$ and $\tilde{\mathbf{S}}_\ell$ the
+Shampoo factors from the preceding section.  Because
+$\tr(\Phi_\ell)=\tr(\Psi_\ell)=1$,
+$\tr(\hat{\mathbf{F}}_\ell)=\delta_\ell$,
+which equals the trace of the true Fisher block.
+
+\medskip
+\noindent\textbf{Connection to Shampoo.}\quad
+TKFAC's factors $\Phi_\ell,\Psi_\ell$ use the same per-sample
+reweighting as Shampoo but add trace normalisation and the
+trace-matching scalar~$\delta_\ell$.
+The eigenbasis is determined by the reweighted factors, not by
+K-FAC's independent covariances, so TKFAC's eigenvectors generally
+differ from K-FAC's.
 
 \subsection{ETKFAC (Eigenvalue-corrected TKFAC)}
 
-ETKFAC uses TKFAC's trace-scaled factors for the eigendecomposition,
-then applies EK-FAC-style eigenvalue corrections in that basis.
-
-\medskip
-\noindent\textbf{Equivalence to EK-FAC.}\quad
-Since trace scaling preserves eigenvectors, the ETKFAC eigenbasis is
-identical to both TKFAC's and K-FAC's.  The eigenvalue corrections
-are computed from per-sample projections into the eigenbasis and do
-not depend on the factor scaling.  Therefore ETKFAC produces the
-same matrix as EK-FAC (up to numerical precision).
+ETKFAC uses the same reweighted eigenbasis as TKFAC (i.e.\ from
+the Shampoo factors $\tilde{\mathbf{A}}_\ell$ and
+$\tilde{\mathbf{S}}_\ell$), but replaces the outer-product
+eigenvalues with per-sample corrected values~$s^\star_{jm}$,
+computed identically to EK-FAC but in the reweighted eigenbasis.
+Because the eigenbasis differs from K-FAC's, ETKFAC is
+\emph{not} equivalent to EK-FAC.
 
 \section{Pseudo-inverse}
 

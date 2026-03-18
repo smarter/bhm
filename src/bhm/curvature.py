@@ -237,33 +237,38 @@ def compute_ekfac(
     return (E + E.T) / 2
 
 
-def compute_shampoo(
+def _shampoo_factors(
     model: MLP,
     x: Float[Array, "N 64"],
     y: Int[Array, " N"],
-) -> Float[Array, "D D"]:
-    """Shampoo: Kronecker-factored curvature with per-sample reweighting.
+) -> tuple[
+    Float[Array, "N 10"],
+    list[Float[Array, "N _in"]],
+    list[Float[Array, "N _out"]],
+    Float[Array, "N C C"],
+    list[tuple[Float[Array, "din din"], Float[Array, "dout dout"], Float[Array, ""]]],
+]:
+    """Compute per-layer Shampoo factors (shared by Shampoo, EShampoo, TKFAC, ETKFAC).
 
-    Instead of K-FAC's independent covariance factors, Shampoo derives factors
-    from the Gram matrices of the per-sample gradient matrix. Each sample's A
-    contribution is weighted by its gradient norm, and each S contribution by
-    its activation norm.
+    Returns (logits, activations, pre_acts, H_out, layer_factors) where each
+    layer_factors entry is (A_tilde, S_tilde, delta_l):
+      A_tilde = (1/N) Σ w_i a_i a_i^T  (reweighted by gradient norm)
+      S_tilde = (1/N) Σ ||a_i||^2 S_i  (reweighted by activation norm)
+      delta_l = (1/N) Σ ||a_i||^2 w_i   (trace-matching scalar)
     """
-    flat_params, _ = jax.flatten_util.ravel_pytree(model)
-    D = flat_params.shape[0]
     N = x.shape[0]
 
     logits, activations, pre_acts = _forward_with_activations(model, x)
     H_out = jax.vmap(_ce_output_hessian)(logits)  # (N, C, C)
 
     ranges = _get_layer_param_ranges(model)
-    Sh = jnp.zeros((D, D))
+    layer_factors = []
 
     for l, (start, end) in enumerate(ranges):
         a = activations[l]  # (N, d_in)
         B = _preact_jacobian(model, l, pre_acts[l])  # (N, C, d_out)
 
-        # Per-sample S_i = B_i^T H_out_i B_i: need (N, d_out, d_out)
+        # Per-sample S_i = B_i^T H_out_i B_i: (N, d_out, d_out)
         temp = jnp.einsum("nce,ned->ncd", H_out, B)  # (N, C, d_out)
         S_per = jnp.einsum("ncd,ncf->ndf", B, temp)  # (N, d_out, d_out)
 
@@ -277,7 +282,37 @@ def compute_shampoo(
         a_norm_sq = jnp.sum(a**2, axis=1)  # (N,)
         S_tilde = jnp.einsum("n,ndf->df", a_norm_sq, S_per) / N
 
-        Sh = Sh.at[start:end, start:end].set(jnp.kron(S_tilde, A_tilde))
+        # delta = E[||a||^2 * ||g||^2] = (1/N) Σ ||a_i||^2 * w_i
+        delta_l = jnp.sum(a_norm_sq * w) / N
+
+        layer_factors.append((A_tilde, S_tilde, delta_l))
+
+    return logits, activations, pre_acts, H_out, layer_factors
+
+
+def compute_shampoo(
+    model: MLP,
+    x: Float[Array, "N 64"],
+    y: Int[Array, " N"],
+) -> Float[Array, "D D"]:
+    """Shampoo: Kronecker-factored curvature with per-sample reweighting.
+
+    Uses Gram matrices of the per-sample gradient matrix. The activation
+    factor is trace-normalised. Eigenvalues are outer products of marginal
+    spectra (like K-FAC).
+    """
+    flat_params, _ = jax.flatten_util.ravel_pytree(model)
+    D = flat_params.shape[0]
+
+    _, _, _, _, layer_factors = _shampoo_factors(model, x, y)
+
+    ranges = _get_layer_param_ranges(model)
+    Sh = jnp.zeros((D, D))
+
+    for (start, end), (A_tilde, S_tilde, _) in zip(ranges, layer_factors):
+        # Trace-normalise A (matching reference implementation)
+        A_norm = A_tilde / jnp.trace(A_tilde)
+        Sh = Sh.at[start:end, start:end].set(jnp.kron(S_tilde, A_norm))
 
     return (Sh + Sh.T) / 2
 
@@ -298,26 +333,15 @@ def compute_eshampoo(
     N = x.shape[0]
     C = 10
 
-    logits, activations, pre_acts = _forward_with_activations(model, x)
-    p = jax.nn.softmax(logits, axis=-1)  # (N, C)
-    H_out = jax.vmap(_ce_output_hessian)(logits)  # (N, C, C)
+    logits, activations, pre_acts, _, layer_factors = _shampoo_factors(model, x, y)
+    p = jax.nn.softmax(logits, axis=-1)
 
     ranges = _get_layer_param_ranges(model)
     ES = jnp.zeros((D, D))
 
-    for l, (start, end) in enumerate(ranges):
+    for l, ((start, end), (A_tilde, S_tilde, _)) in enumerate(zip(ranges, layer_factors)):
         a = activations[l]
         B = _preact_jacobian(model, l, pre_acts[l])
-
-        # Per-sample S_i (same as Shampoo)
-        temp = jnp.einsum("nce,ned->ncd", H_out, B)
-        S_per = jnp.einsum("ncd,ncf->ndf", B, temp)
-
-        w = jnp.trace(S_per, axis1=-2, axis2=-1)
-        A_tilde = jnp.einsum("n,ni,nj->ij", w, a, a) / N
-
-        a_norm_sq = jnp.sum(a**2, axis=1)
-        S_tilde = jnp.einsum("n,ndf->df", a_norm_sq, S_per) / N
 
         # Trace-normalise A
         A_norm = A_tilde / jnp.trace(A_tilde)
@@ -348,35 +372,28 @@ def compute_tkfac(
     x: Float[Array, "N 64"],
     y: Int[Array, " N"],
 ) -> Float[Array, "D D"]:
-    """TKFAC: Trace-normalised K-FAC using the real FIM.
+    """TKFAC: Trace-restricted K-FAC (Gao & Liu 2020).
 
-    Scales K-FAC factors by the other factor's trace:
-      A_T = A * tr(S),  S_T = S * tr(A)
-    This uniformly scales K-FAC eigenvalues by tr(A)*tr(S).
+    Decomposes each Fisher block as F_l = delta_l * Phi_l ⊗ Psi_l where:
+      Phi_l = E[||g||^2 a a^T] / E[||a||^2 ||g||^2]  (unit-trace)
+      Psi_l = E[||a||^2 g g^T] / E[||a||^2 ||g||^2]  (unit-trace)
+      delta_l = E[||a||^2 ||g||^2]  (trace-matching scalar)
+    This matches the trace of the true Fisher block.
     """
     flat_params, _ = jax.flatten_util.ravel_pytree(model)
     D = flat_params.shape[0]
-    N = x.shape[0]
 
-    logits, activations, pre_acts = _forward_with_activations(model, x)
-    H_out = jax.vmap(_ce_output_hessian)(logits)
+    _, _, _, _, layer_factors = _shampoo_factors(model, x, y)
 
     ranges = _get_layer_param_ranges(model)
     T = jnp.zeros((D, D))
 
-    for l, (start, end) in enumerate(ranges):
-        a = activations[l]
-        A = (a.T @ a) / N
+    for (start, end), (A_tilde, S_tilde, delta_l) in zip(ranges, layer_factors):
+        # Normalise factors to unit trace (Eq. 4.9 from Gao & Liu 2020)
+        Phi = A_tilde / jnp.trace(A_tilde)
+        Psi = S_tilde / jnp.trace(S_tilde)
 
-        B = _preact_jacobian(model, l, pre_acts[l])
-        temp = jnp.einsum("nce,ned->ncd", H_out, B)
-        S = jnp.einsum("ncd,ncf->df", B, temp) / N
-
-        # Trace-scale the factors
-        A_T = A * jnp.trace(S)
-        S_T = S * jnp.trace(A)
-
-        T = T.at[start:end, start:end].set(jnp.kron(S_T, A_T))
+        T = T.at[start:end, start:end].set(delta_l * jnp.kron(Psi, Phi))
 
     return (T + T.T) / 2
 
@@ -388,41 +405,32 @@ def compute_etkfac(
 ) -> Float[Array, "D D"]:
     """ETKFAC: Eigenvalue-corrected TKFAC using the real FIM.
 
-    Uses TKFAC's trace-scaled factors for eigendecomposition with EK-FAC-style
-    eigenvalue corrections. Since trace scaling preserves eigenvectors, ETKFAC
-    is mathematically equivalent to EK-FAC.
+    Uses TKFAC's per-sample reweighted eigenbasis (from Shampoo factors) with
+    EK-FAC-style eigenvalue corrections. The eigenbasis differs from standard
+    K-FAC/EK-FAC because the factors are reweighted.
     """
     flat_params, _ = jax.flatten_util.ravel_pytree(model)
     D = flat_params.shape[0]
     N = x.shape[0]
     C = 10
 
-    logits, activations, pre_acts = _forward_with_activations(model, x)
+    logits, activations, pre_acts, _, layer_factors = _shampoo_factors(model, x, y)
     p = jax.nn.softmax(logits, axis=-1)
 
     ranges = _get_layer_param_ranges(model)
     ET = jnp.zeros((D, D))
 
-    for l, (start, end) in enumerate(ranges):
+    for l, ((start, end), (A_tilde, S_tilde, _)) in enumerate(zip(ranges, layer_factors)):
         a = activations[l]
-        A = (a.T @ a) / N
-
         B = _preact_jacobian(model, l, pre_acts[l])
-        H_out = jax.vmap(_ce_output_hessian)(logits)
-        temp = jnp.einsum("nce,ned->ncd", H_out, B)
-        S = jnp.einsum("ncd,ncf->df", B, temp) / N
 
-        # Trace-scale factors (preserves eigenvectors)
-        A_T = A * jnp.trace(S)
-        S_T = S * jnp.trace(A)
-
-        # Eigenbases from trace-scaled factors (= same as unscaled)
-        _, U_A_np = np.linalg.eigh(np.asarray(A_T, dtype=np.float64))
-        _, U_S_np = np.linalg.eigh(np.asarray(S_T, dtype=np.float64))
+        # Eigenbases from reweighted factors (numpy float64 for stability)
+        _, U_A_np = np.linalg.eigh(np.asarray(A_tilde, dtype=np.float64))
+        _, U_S_np = np.linalg.eigh(np.asarray(S_tilde, dtype=np.float64))
         U_A = jnp.array(U_A_np, dtype=jnp.float32)
         U_S = jnp.array(U_S_np, dtype=jnp.float32)
 
-        # Eigenvalue corrections (identical to EK-FAC)
+        # Eigenvalue corrections in the reweighted eigenbasis
         delta = p[:, None, :] - jnp.eye(C)[None, :, :]
         Ds = jnp.einsum("nkd,nck->ncd", B, delta)
         q = a @ U_A
