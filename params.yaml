@@ -1,14 +1,9 @@
-defaults:
-  - _self_
-
 experiment:
   depth: 8
   width: 16
-  epochs: 100
-
+  epochs: 1000
 train:
   lr: 0.03
   batch_size: 32
-
 seed: 0
 chunk_size: 32
