@@ -1,6 +1,7 @@
 import jax
 import jax.flatten_util
 import jax.numpy as jnp
+import numpy as np
 
 from bhm.curvature import (
     compute_block_ggn,
@@ -159,29 +160,34 @@ def test_ekfac_reconstructs_from_factors():
     model, x, y = _make_tiny_setup()
     E = compute_ekfac(model, x, y)
     from bhm.curvature import (
-        _backprop_preact_grads,
+        _backprop_fim_preact_grads,
         _forward_with_activations,
         _get_layer_param_ranges,
     )
 
     logits, activations, pre_acts = _forward_with_activations(model, x)
-    ds_list = _backprop_preact_grads(model, logits, y, pre_acts)
+    p = jax.nn.softmax(logits, axis=-1)
+    ds_list = _backprop_fim_preact_grads(model, logits, pre_acts)
     ranges = _get_layer_param_ranges(model)
     N = x.shape[0]
 
     for l, (start, end) in enumerate(ranges):
-        a = activations[l]
-        ds = ds_list[l]
+        a = activations[l]  # (N, in_l)
+        ds = ds_list[l]  # (N, C, out_l)
 
         A = (a.T @ a) / N
-        S = (ds.T @ ds) / N
-        _, U_A = jnp.linalg.eigh(A)
-        _, U_S = jnp.linalg.eigh(S)
-        U = jnp.kron(U_S, U_A)
-        q = a @ U_A
-        r = ds @ U_S
-        s_star = ((r**2).T @ (q**2) / N).ravel()
+        S = jnp.einsum("nc,ncd,nce->de", p, ds, ds) / N
 
+        _, U_A_np = np.linalg.eigh(np.asarray(A, dtype=np.float64))
+        _, U_S_np = np.linalg.eigh(np.asarray(S, dtype=np.float64))
+        U_A = jnp.array(U_A_np, dtype=jnp.float32)
+        U_S = jnp.array(U_S_np, dtype=jnp.float32)
+
+        q = a @ U_A
+        r = jnp.einsum("ncd,de->nce", ds, U_S)
+        s_star = (jnp.einsum("nc,ncj,nm->jm", p, r**2, q**2) / N).ravel()
+
+        U = jnp.kron(U_S, U_A)
         expected = U @ jnp.diag(s_star) @ U.T
 
         E_block = E[start:end, start:end]
