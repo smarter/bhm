@@ -1,6 +1,7 @@
 import jax
 import jax.flatten_util
 import jax.numpy as jnp
+import numpy as np
 from jaxtyping import Array, Float, Int
 
 from bhm.model import MLP
@@ -9,9 +10,11 @@ from bhm.model import MLP
 def pseudo_inverse(
     M: Float[Array, "D D"], eps: float = 1e-4
 ) -> Float[Array, "D D"]:
-    eigenvalues, eigenvectors = jnp.linalg.eigh(M)
-    inv_eigenvalues = jnp.where(jnp.abs(eigenvalues) > eps, 1.0 / eigenvalues, 0.0)
-    return eigenvectors @ jnp.diag(jnp.asarray(inv_eigenvalues)) @ eigenvectors.T
+    # Use numpy float64 eigendecomposition for numerical stability
+    eigenvalues, eigenvectors = np.linalg.eigh(np.asarray(M, dtype=np.float64))
+    inv_eigenvalues = np.where(np.abs(eigenvalues) > eps, 1.0 / eigenvalues, 0.0)
+    result = eigenvectors @ np.diag(inv_eigenvalues) @ eigenvectors.T
+    return jnp.array(result, dtype=jnp.float32)
 
 
 def per_sample_gradients(

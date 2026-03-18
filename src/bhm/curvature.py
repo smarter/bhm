@@ -1,6 +1,7 @@
 import jax
 import jax.flatten_util
 import jax.numpy as jnp
+import numpy as np
 from jaxtyping import Array, Float, Int
 
 from bhm.model import MLP
@@ -212,9 +213,11 @@ def compute_ekfac(
         A = (a.T @ a) / N  # (in_l, in_l)
         S = (ds.T @ ds) / N  # (out_l, out_l)
 
-        # Eigenbases of the K-FAC factors
-        _, U_A = jnp.linalg.eigh(A)  # (in_l, in_l)
-        _, U_S = jnp.linalg.eigh(S)  # (out_l, out_l)
+        # Eigenbases of the K-FAC factors (use numpy float64 for stability)
+        _, U_A_np = np.linalg.eigh(np.asarray(A, dtype=np.float64))
+        _, U_S_np = np.linalg.eigh(np.asarray(S, dtype=np.float64))
+        U_A = jnp.array(U_A_np, dtype=jnp.float32)
+        U_S = jnp.array(U_S_np, dtype=jnp.float32)
 
         # Rotate per-sample activations and gradients into the eigenbasis
         q = a @ U_A  # (N, in_l)
