@@ -6,9 +6,13 @@ import numpy as np
 from bhm.curvature import (
     compute_block_ggn,
     compute_ekfac,
+    compute_eshampoo,
+    compute_etkfac,
     compute_ggn,
     compute_hessian,
     compute_kfac,
+    compute_shampoo,
+    compute_tkfac,
 )
 from bhm.evaluate import approximation_error, per_sample_gradients, pseudo_inverse
 from bhm.model import MLP
@@ -200,6 +204,119 @@ def test_ekfac_reconstructs_from_factors():
             f"Layer {l}: EK-FAC block doesn't match reconstruction, "
             f"max diff = {jnp.max(jnp.abs(E_block - expected))}"
         )
+
+
+def test_shampoo_symmetric_psd():
+    model, x, y = _make_tiny_setup()
+    S = compute_shampoo(model, x, y)
+    assert jnp.allclose(S, S.T, atol=1e-5), f"Shampoo not symmetric"
+    eigenvalues = jnp.linalg.eigvalsh(S)
+    assert jnp.all(eigenvalues >= -1e-5), f"Shampoo not PSD: min eigenvalue {jnp.min(eigenvalues)}"
+
+
+def test_shampoo_is_block_diagonal():
+    model, x, y = _make_tiny_setup()
+    S = compute_shampoo(model, x, y)
+    from bhm.curvature import _get_layer_param_ranges
+
+    ranges = _get_layer_param_ranges(model)
+    for i, (s1, e1) in enumerate(ranges):
+        for j, (s2, e2) in enumerate(ranges):
+            if i != j:
+                assert jnp.allclose(
+                    S[s1:e1, s2:e2], 0.0, atol=1e-10
+                ), f"Shampoo off-diagonal block [{s1}:{e1},{s2}:{e2}] not zero"
+
+
+def test_shampoo_differs_from_kfac():
+    """Shampoo's per-sample reweighting should make it differ from K-FAC."""
+    model, x, y = _make_tiny_setup()
+    S = compute_shampoo(model, x, y)
+    K = compute_kfac(model, x, y)
+    diff = jnp.max(jnp.abs(S - K))
+    assert diff > 1e-6, f"Shampoo and K-FAC are identical (diff={diff})"
+
+
+def test_eshampoo_symmetric_psd():
+    model, x, y = _make_tiny_setup()
+    ES = compute_eshampoo(model, x, y)
+    assert jnp.allclose(ES, ES.T, atol=1e-5), f"EShampoo not symmetric"
+    eigenvalues = jnp.linalg.eigvalsh(ES)
+    assert jnp.all(eigenvalues >= -1e-5), f"EShampoo not PSD: min eigenvalue {jnp.min(eigenvalues)}"
+
+
+def test_eshampoo_is_block_diagonal():
+    model, x, y = _make_tiny_setup()
+    ES = compute_eshampoo(model, x, y)
+    from bhm.curvature import _get_layer_param_ranges
+
+    ranges = _get_layer_param_ranges(model)
+    for i, (s1, e1) in enumerate(ranges):
+        for j, (s2, e2) in enumerate(ranges):
+            if i != j:
+                assert jnp.allclose(
+                    ES[s1:e1, s2:e2], 0.0, atol=1e-10
+                ), f"EShampoo off-diagonal block [{s1}:{e1},{s2}:{e2}] not zero"
+
+
+def test_tkfac_symmetric_psd():
+    model, x, y = _make_tiny_setup()
+    T = compute_tkfac(model, x, y)
+    assert jnp.allclose(T, T.T, atol=1e-5), f"TKFAC not symmetric"
+    eigenvalues = jnp.linalg.eigvalsh(T)
+    assert jnp.all(eigenvalues >= -1e-5), f"TKFAC not PSD: min eigenvalue {jnp.min(eigenvalues)}"
+
+
+def test_tkfac_is_block_diagonal():
+    model, x, y = _make_tiny_setup()
+    T = compute_tkfac(model, x, y)
+    from bhm.curvature import _get_layer_param_ranges
+
+    ranges = _get_layer_param_ranges(model)
+    for i, (s1, e1) in enumerate(ranges):
+        for j, (s2, e2) in enumerate(ranges):
+            if i != j:
+                assert jnp.allclose(
+                    T[s1:e1, s2:e2], 0.0, atol=1e-10
+                ), f"TKFAC off-diagonal block [{s1}:{e1},{s2}:{e2}] not zero"
+
+
+def test_tkfac_proportional_to_kfac():
+    """TKFAC blocks should equal K-FAC blocks scaled by tr(A)*tr(S) per layer."""
+    model, x, y = _make_tiny_setup()
+    T = compute_tkfac(model, x, y)
+    K = compute_kfac(model, x, y)
+    from bhm.curvature import _get_layer_param_ranges
+
+    ranges = _get_layer_param_ranges(model)
+    for start, end in ranges:
+        T_block = T[start:end, start:end]
+        K_block = K[start:end, start:end]
+        # Find the ratio: T_block = scale * K_block
+        # Use Frobenius norm ratio since element-wise may have zeros
+        scale = jnp.sum(T_block * K_block) / jnp.sum(K_block * K_block)
+        assert jnp.allclose(T_block, scale * K_block, atol=1e-4), (
+            f"TKFAC block [{start}:{end}] not proportional to K-FAC"
+        )
+        assert scale > 0, f"Scale should be positive, got {scale}"
+
+
+def test_etkfac_symmetric_psd():
+    model, x, y = _make_tiny_setup()
+    ET = compute_etkfac(model, x, y)
+    assert jnp.allclose(ET, ET.T, atol=1e-5), f"ETKFAC not symmetric"
+    eigenvalues = jnp.linalg.eigvalsh(ET)
+    assert jnp.all(eigenvalues >= -1e-5), f"ETKFAC not PSD: min eigenvalue {jnp.min(eigenvalues)}"
+
+
+def test_etkfac_equals_ekfac():
+    """ETKFAC is mathematically equivalent to EK-FAC (trace scaling preserves eigenvectors)."""
+    model, x, y = _make_tiny_setup()
+    ET = compute_etkfac(model, x, y)
+    EK = compute_ekfac(model, x, y)
+    assert jnp.allclose(ET, EK, atol=1e-4), (
+        f"ETKFAC differs from EK-FAC: max diff = {jnp.max(jnp.abs(ET - EK))}"
+    )
 
 
 def test_pseudo_inverse():

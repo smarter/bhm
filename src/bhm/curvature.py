@@ -237,6 +237,206 @@ def compute_ekfac(
     return (E + E.T) / 2
 
 
+def compute_shampoo(
+    model: MLP,
+    x: Float[Array, "N 64"],
+    y: Int[Array, " N"],
+) -> Float[Array, "D D"]:
+    """Shampoo: Kronecker-factored curvature with per-sample reweighting.
+
+    Instead of K-FAC's independent covariance factors, Shampoo derives factors
+    from the Gram matrices of the per-sample gradient matrix. Each sample's A
+    contribution is weighted by its gradient norm, and each S contribution by
+    its activation norm.
+    """
+    flat_params, _ = jax.flatten_util.ravel_pytree(model)
+    D = flat_params.shape[0]
+    N = x.shape[0]
+
+    logits, activations, pre_acts = _forward_with_activations(model, x)
+    H_out = jax.vmap(_ce_output_hessian)(logits)  # (N, C, C)
+
+    ranges = _get_layer_param_ranges(model)
+    Sh = jnp.zeros((D, D))
+
+    for l, (start, end) in enumerate(ranges):
+        a = activations[l]  # (N, d_in)
+        B = _preact_jacobian(model, l, pre_acts[l])  # (N, C, d_out)
+
+        # Per-sample S_i = B_i^T H_out_i B_i: need (N, d_out, d_out)
+        temp = jnp.einsum("nce,ned->ncd", H_out, B)  # (N, C, d_out)
+        S_per = jnp.einsum("ncd,ncf->ndf", B, temp)  # (N, d_out, d_out)
+
+        # w_i = tr(S_i) = expected squared gradient norm per sample
+        w = jnp.trace(S_per, axis1=-2, axis2=-1)  # (N,)
+
+        # A_tilde = (1/N) Σ w_i a_i a_i^T  (reweighted activation covariance)
+        A_tilde = jnp.einsum("n,ni,nj->ij", w, a, a) / N
+
+        # S_tilde = (1/N) Σ ||a_i||^2 S_i  (reweighted gradient covariance)
+        a_norm_sq = jnp.sum(a**2, axis=1)  # (N,)
+        S_tilde = jnp.einsum("n,ndf->df", a_norm_sq, S_per) / N
+
+        Sh = Sh.at[start:end, start:end].set(jnp.kron(S_tilde, A_tilde))
+
+    return (Sh + Sh.T) / 2
+
+
+def compute_eshampoo(
+    model: MLP,
+    x: Float[Array, "N 64"],
+    y: Int[Array, " N"],
+) -> Float[Array, "D D"]:
+    """EShampoo: Eigenvalue-corrected Shampoo using the real FIM.
+
+    Combines Shampoo's reweighted factors with EK-FAC-style eigenvalue
+    corrections. The activation factor is trace-normalised before
+    eigendecomposition.
+    """
+    flat_params, _ = jax.flatten_util.ravel_pytree(model)
+    D = flat_params.shape[0]
+    N = x.shape[0]
+    C = 10
+
+    logits, activations, pre_acts = _forward_with_activations(model, x)
+    p = jax.nn.softmax(logits, axis=-1)  # (N, C)
+    H_out = jax.vmap(_ce_output_hessian)(logits)  # (N, C, C)
+
+    ranges = _get_layer_param_ranges(model)
+    ES = jnp.zeros((D, D))
+
+    for l, (start, end) in enumerate(ranges):
+        a = activations[l]
+        B = _preact_jacobian(model, l, pre_acts[l])
+
+        # Per-sample S_i (same as Shampoo)
+        temp = jnp.einsum("nce,ned->ncd", H_out, B)
+        S_per = jnp.einsum("ncd,ncf->ndf", B, temp)
+
+        w = jnp.trace(S_per, axis1=-2, axis2=-1)
+        A_tilde = jnp.einsum("n,ni,nj->ij", w, a, a) / N
+
+        a_norm_sq = jnp.sum(a**2, axis=1)
+        S_tilde = jnp.einsum("n,ndf->df", a_norm_sq, S_per) / N
+
+        # Trace-normalise A
+        A_norm = A_tilde / jnp.trace(A_tilde)
+
+        # Eigenbases (numpy float64 for stability)
+        _, U_A_np = np.linalg.eigh(np.asarray(A_norm, dtype=np.float64))
+        _, U_S_np = np.linalg.eigh(np.asarray(S_tilde, dtype=np.float64))
+        U_A = jnp.array(U_A_np, dtype=jnp.float32)
+        U_S = jnp.array(U_S_np, dtype=jnp.float32)
+
+        # Eigenvalue corrections (same formula as EK-FAC)
+        delta = p[:, None, :] - jnp.eye(C)[None, :, :]
+        Ds = jnp.einsum("nkd,nck->ncd", B, delta)
+        q = a @ U_A
+        r = jnp.einsum("ncd,de->nce", Ds, U_S)
+        s_star = jnp.einsum("nc,ncj,nm->jm", p, r**2, q**2) / N
+        s_star_flat = s_star.ravel()
+
+        U = jnp.kron(U_S, U_A)
+        block = U @ jnp.diag(s_star_flat) @ U.T
+        ES = ES.at[start:end, start:end].set(block)
+
+    return (ES + ES.T) / 2
+
+
+def compute_tkfac(
+    model: MLP,
+    x: Float[Array, "N 64"],
+    y: Int[Array, " N"],
+) -> Float[Array, "D D"]:
+    """TKFAC: Trace-normalised K-FAC using the real FIM.
+
+    Scales K-FAC factors by the other factor's trace:
+      A_T = A * tr(S),  S_T = S * tr(A)
+    This uniformly scales K-FAC eigenvalues by tr(A)*tr(S).
+    """
+    flat_params, _ = jax.flatten_util.ravel_pytree(model)
+    D = flat_params.shape[0]
+    N = x.shape[0]
+
+    logits, activations, pre_acts = _forward_with_activations(model, x)
+    H_out = jax.vmap(_ce_output_hessian)(logits)
+
+    ranges = _get_layer_param_ranges(model)
+    T = jnp.zeros((D, D))
+
+    for l, (start, end) in enumerate(ranges):
+        a = activations[l]
+        A = (a.T @ a) / N
+
+        B = _preact_jacobian(model, l, pre_acts[l])
+        temp = jnp.einsum("nce,ned->ncd", H_out, B)
+        S = jnp.einsum("ncd,ncf->df", B, temp) / N
+
+        # Trace-scale the factors
+        A_T = A * jnp.trace(S)
+        S_T = S * jnp.trace(A)
+
+        T = T.at[start:end, start:end].set(jnp.kron(S_T, A_T))
+
+    return (T + T.T) / 2
+
+
+def compute_etkfac(
+    model: MLP,
+    x: Float[Array, "N 64"],
+    y: Int[Array, " N"],
+) -> Float[Array, "D D"]:
+    """ETKFAC: Eigenvalue-corrected TKFAC using the real FIM.
+
+    Uses TKFAC's trace-scaled factors for eigendecomposition with EK-FAC-style
+    eigenvalue corrections. Since trace scaling preserves eigenvectors, ETKFAC
+    is mathematically equivalent to EK-FAC.
+    """
+    flat_params, _ = jax.flatten_util.ravel_pytree(model)
+    D = flat_params.shape[0]
+    N = x.shape[0]
+    C = 10
+
+    logits, activations, pre_acts = _forward_with_activations(model, x)
+    p = jax.nn.softmax(logits, axis=-1)
+
+    ranges = _get_layer_param_ranges(model)
+    ET = jnp.zeros((D, D))
+
+    for l, (start, end) in enumerate(ranges):
+        a = activations[l]
+        A = (a.T @ a) / N
+
+        B = _preact_jacobian(model, l, pre_acts[l])
+        H_out = jax.vmap(_ce_output_hessian)(logits)
+        temp = jnp.einsum("nce,ned->ncd", H_out, B)
+        S = jnp.einsum("ncd,ncf->df", B, temp) / N
+
+        # Trace-scale factors (preserves eigenvectors)
+        A_T = A * jnp.trace(S)
+        S_T = S * jnp.trace(A)
+
+        # Eigenbases from trace-scaled factors (= same as unscaled)
+        _, U_A_np = np.linalg.eigh(np.asarray(A_T, dtype=np.float64))
+        _, U_S_np = np.linalg.eigh(np.asarray(S_T, dtype=np.float64))
+        U_A = jnp.array(U_A_np, dtype=jnp.float32)
+        U_S = jnp.array(U_S_np, dtype=jnp.float32)
+
+        # Eigenvalue corrections (identical to EK-FAC)
+        delta = p[:, None, :] - jnp.eye(C)[None, :, :]
+        Ds = jnp.einsum("nkd,nck->ncd", B, delta)
+        q = a @ U_A
+        r = jnp.einsum("ncd,de->nce", Ds, U_S)
+        s_star = jnp.einsum("nc,ncj,nm->jm", p, r**2, q**2) / N
+        s_star_flat = s_star.ravel()
+
+        U = jnp.kron(U_S, U_A)
+        block = U @ jnp.diag(s_star_flat) @ U.T
+        ET = ET.at[start:end, start:end].set(block)
+
+    return (ET + ET.T) / 2
+
+
 def compute_block_ggn(
     model: MLP,
     x: Float[Array, "N 64"],
