@@ -1,0 +1,19 @@
+stages:
+  experiment:
+    cmd: uv run python -m bhm.run_single
+    deps:
+      - src/bhm/run_single.py
+      - src/bhm/experiment.py
+      - src/bhm/curvature.py
+      - src/bhm/evaluate.py
+      - src/bhm/train.py
+      - src/bhm/model.py
+      - src/bhm/data.py
+    params:
+      - experiment
+      - train
+      - seed
+      - chunk_size
+    metrics:
+      - results/metrics.json:
+          cache: false

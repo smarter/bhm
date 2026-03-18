@@ -1,0 +1,10 @@
+defaults:
+  - experiment: default
+  - _self_
+
+train:
+  lr: 0.03
+  batch_size: 32
+
+seed: 0
+chunk_size: 32
