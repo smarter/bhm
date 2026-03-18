@@ -258,6 +258,119 @@ Since $\Delta s_\ell^{(i,c)} = \mathbf{B}_{\ell,i}^\top(p_i - e_c)$,
 we compute the per-class pre-activation gradients from the same
 sub-network Jacobian $\mathbf{B}_\ell$ used in K-FAC.
 
+\section{Shampoo}
+
+K-FAC assumes statistical independence between the layer input~$a$
+and the pre-activation gradient~$\Delta s$.  Shampoo relaxes this by
+deriving the Kronecker factors from the Gram matrices of the
+per-sample gradient \emph{matrix}
+$\mathbf{G}_i^{(c)} = \Delta s_\ell^{(i,c)}\,a_i^\top$
+rather than from the separate activation and gradient covariances.
+
+\subsection{Derivation}
+
+For a single sample~$i$ and class~$c$, the unvectorised weight
+gradient is $\mathbf{G}_i^{(c)} = \Delta s_\ell^{(i,c)}\,a_i^\top$
+(rank-1, shape $d_{\text{out}}\times d_{\text{in}}$).
+Its left and right Gram matrices are
+\begin{align*}
+  \mathbf{G}_i^{(c)}\,\mathbf{G}_i^{(c)\top}
+  &= \|a_i\|^2\;\Delta s_\ell^{(i,c)}\,\Delta s_\ell^{(i,c)\top},\\[4pt]
+  \mathbf{G}_i^{(c)\top}\,\mathbf{G}_i^{(c)}
+  &= \|\Delta s_\ell^{(i,c)}\|^2\; a_i\,a_i^\top.
+\end{align*}
+Averaging over samples and classes (real Fisher weighting) gives the
+Shampoo factors:
+\[
+  \tilde{\mathbf{A}}_\ell
+  = \frac{1}{N}\sum_{i=1}^{N} w_i\; a_i\,a_i^\top,
+  \qquad
+  \tilde{\mathbf{S}}_\ell
+  = \frac{1}{N}\sum_{i=1}^{N} \|a_i\|^2\; \mathbf{S}_i,
+\]
+where $w_i = \tr(\mathbf{S}_i)
+= \sum_c p_{ic}\,\|\Delta s_\ell^{(i,c)}\|^2$
+is the expected squared gradient norm for sample~$i$, and
+$\mathbf{S}_i = \mathbf{B}_{\ell,i}^\top\,\mathbf{H}_i^{(u)}\,
+\mathbf{B}_{\ell,i}$
+is the per-sample contribution to the K-FAC~$\mathbf{S}$ factor.
+
+The Shampoo curvature block is
+$\hat{\mathbf{G}}_\ell^{\text{Sh}}
+= \tilde{\mathbf{S}}_\ell \kron \tilde{\mathbf{A}}_\ell$
+with eigenvalues given by the outer product of the marginal spectra
+(same as K-FAC).
+
+\subsection{Interpretation}
+
+Compared with K-FAC, Shampoo re-weights each sample's contribution:
+\begin{itemize}
+\item The activation factor~$\tilde{\mathbf{A}}$ up-weights samples
+  whose gradients are large ($w_i$ high).
+\item The gradient factor~$\tilde{\mathbf{S}}$ up-weights samples
+  whose activations are large ($\|a_i\|^2$ high).
+\end{itemize}
+This partially captures the activation--gradient correlation that
+K-FAC's independence assumption discards.
+
+\section{EShampoo}
+
+EShampoo combines Shampoo's re-weighted factors with the eigenvalue
+correction strategy of EK-FAC:
+\begin{enumerate}
+\item Compute the Shampoo factors $\tilde{\mathbf{A}}_\ell$ and
+  $\tilde{\mathbf{S}}_\ell$ as above.
+\item Trace-normalise the activation factor:
+  $\tilde{\mathbf{A}}_\ell^{\text{norm}}
+  = \tilde{\mathbf{A}}_\ell / \tr(\tilde{\mathbf{A}}_\ell)$.
+\item Obtain the Shampoo eigenbasis
+  $\mathbf{U}_{\tilde{\mathbf{S}}} \kron
+   \mathbf{U}_{\tilde{\mathbf{A}}}$
+  from eigendecompositions of
+  $\tilde{\mathbf{A}}_\ell^{\text{norm}}$ and
+  $\tilde{\mathbf{S}}_\ell$.
+\item Replace the outer-product eigenvalues with per-sample
+  corrected values~$s^\star_{jm}$, computed identically to
+  EK-FAC but in the Shampoo eigenbasis.
+\end{enumerate}
+The corrected matrix is
+$\hat{\mathbf{G}}_\ell^{\text{ESh}}
+= \mathbf{U}\,\diag(\vect(\mathbf{S}^\star))\,\mathbf{U}^\top$.
+
+\section{TKFAC and ETKFAC}
+
+\subsection{TKFAC (Trace-normalised K-FAC)}
+
+TKFAC scales each K-FAC factor by the trace of the other:
+\[
+  \mathbf{A}_\ell^{T} = \mathbf{A}_\ell \cdot \tr(\mathbf{S}_\ell),
+  \qquad
+  \mathbf{S}_\ell^{T} = \mathbf{S}_\ell \cdot \tr(\mathbf{A}_\ell).
+\]
+Since scalar multiplication preserves eigenvectors, the TKFAC
+eigenbasis is identical to K-FAC's.  The net effect is a uniform
+scaling of all K-FAC eigenvalues:
+\[
+  \lambda_{jm}^{T}
+  = \tr(\mathbf{A}_\ell)\;\tr(\mathbf{S}_\ell)\;
+    \lambda_{\mathbf{S},j}\;\lambda_{\mathbf{A},m}.
+\]
+This can better match the overall scale of the true curvature block
+without changing its directional structure.
+
+\subsection{ETKFAC (Eigenvalue-corrected TKFAC)}
+
+ETKFAC uses TKFAC's trace-scaled factors for the eigendecomposition,
+then applies EK-FAC-style eigenvalue corrections in that basis.
+
+\medskip
+\noindent\textbf{Equivalence to EK-FAC.}\quad
+Since trace scaling preserves eigenvectors, the ETKFAC eigenbasis is
+identical to both TKFAC's and K-FAC's.  The eigenvalue corrections
+are computed from per-sample projections into the eigenbasis and do
+not depend on the factor scaling.  Therefore ETKFAC produces the
+same matrix as EK-FAC (up to numerical precision).
+
 \section{Pseudo-inverse}
 
 All matrices are inverted via eigendecomposition-based pseudo-inverse.
@@ -300,8 +413,12 @@ $\hat{\mathbf{H}}x = v$ approximates solving $\mathbf{H}x = v$.
   Hessian   & (nothing)               & HVPs via \texttt{jax.jvp} of \texttt{jax.grad} \\
   GGN       & Residual $\mathbf{R}$   & $\mathbf{J}^\top\mathbf{H}^{(u)}\mathbf{J}$ via \texttt{jax.jacobian} \\
   B-GGN     & Cross-layer blocks      & Diagonal blocks of GGN \\
-  EK-FAC    & Off-diagonal in Kron.\ basis & Corrected eigenvalues in $\mathbf{U}_S\kron\mathbf{U}_A$ \\
+  EShampoo  & Off-diag.\ in Shampoo basis & Corrected eigenvalues in $\mathbf{U}_{\tilde S}\kron\mathbf{U}_{\tilde A}$ \\
+  EK-FAC    & Off-diag.\ in Kron.\ basis & Corrected eigenvalues in $\mathbf{U}_S\kron\mathbf{U}_A$ \\
+  ETKFAC    & (equiv.\ to EK-FAC)     & Trace-scaled factors $+$ corrections \\
+  Shampoo   & Eigenvalue correction   & $\tilde{\mathbf{S}}\kron\tilde{\mathbf{A}}$ (reweighted) \\
   K-FAC     & Eigenvalue correction   & $\mathbf{S}\kron\mathbf{A}$ with marginal spectra \\
+  TKFAC     & Eigenvalue correction   & $\mathbf{S}\kron\mathbf{A}$ with trace scaling \\
   \bottomrule
 \end{tabular}
 \end{center}
