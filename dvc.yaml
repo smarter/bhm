@@ -1,6 +1,6 @@
 stages:
   experiment:
-    cmd: uv run python -m bhm.run_single
+    cmd: python -m bhm.run_single
     deps:
       - src/bhm/run_single.py
       - src/bhm/experiment.py
