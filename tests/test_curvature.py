@@ -160,31 +160,36 @@ def test_ekfac_reconstructs_from_factors():
     model, x, y = _make_tiny_setup()
     E = compute_ekfac(model, x, y)
     from bhm.curvature import (
-        _backprop_fim_preact_grads,
+        _ce_output_hessian,
         _forward_with_activations,
         _get_layer_param_ranges,
+        _preact_jacobian,
     )
 
     logits, activations, pre_acts = _forward_with_activations(model, x)
     p = jax.nn.softmax(logits, axis=-1)
-    ds_list = _backprop_fim_preact_grads(model, logits, pre_acts)
+    C = p.shape[1]
     ranges = _get_layer_param_ranges(model)
     N = x.shape[0]
 
     for l, (start, end) in enumerate(ranges):
-        a = activations[l]  # (N, in_l)
-        ds = ds_list[l]  # (N, C, out_l)
+        a = activations[l]
+        B = _preact_jacobian(model, l, pre_acts[l])
+        H_out = jax.vmap(_ce_output_hessian)(logits)
 
         A = (a.T @ a) / N
-        S = jnp.einsum("nc,ncd,nce->de", p, ds, ds) / N
+        temp = jnp.einsum("nce,ned->ncd", H_out, B)
+        S = jnp.einsum("ncd,ncf->df", B, temp) / N
 
         _, U_A_np = np.linalg.eigh(np.asarray(A, dtype=np.float64))
         _, U_S_np = np.linalg.eigh(np.asarray(S, dtype=np.float64))
         U_A = jnp.array(U_A_np, dtype=jnp.float32)
         U_S = jnp.array(U_S_np, dtype=jnp.float32)
 
+        delta = p[:, None, :] - jnp.eye(C)[None, :, :]
+        Ds = jnp.einsum("nkd,nck->ncd", B, delta)
         q = a @ U_A
-        r = jnp.einsum("ncd,de->nce", ds, U_S)
+        r = jnp.einsum("ncd,de->nce", Ds, U_S)
         s_star = (jnp.einsum("nc,ncj,nm->jm", p, r**2, q**2) / N).ravel()
 
         U = jnp.kron(U_S, U_A)
