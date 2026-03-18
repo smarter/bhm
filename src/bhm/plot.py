@@ -10,9 +10,16 @@ import numpy as np
 COLORS = {
     "Hessian": (204 / 255, 57 / 255, 42 / 255),
     "GGN": (79 / 255, 155 / 255, 143 / 255),
+    "B-GGN": (217 / 255, 116 / 255, 89 / 255),
 }
 
-METHODS = ["Hessian", "GGN"]
+METHODS = ["Hessian", "GGN", "B-GGN"]
+
+METHOD_KEYS = {
+    "Hessian": "hessian_error",
+    "GGN": "ggn_error",
+    "B-GGN": "block_ggn_error",
+}
 
 SWEEPS: dict[str, dict[str, object]] = {
     "epoch": {
@@ -70,6 +77,7 @@ def collect_experiments() -> list[dict[str, object]]:
             flat["experiment.epochs"] = params_yaml.get("experiment", {}).get("epochs")
             flat["hessian_error"] = metrics_json.get("hessian_error")
             flat["ggn_error"] = metrics_json.get("ggn_error")
+            flat["block_ggn_error"] = metrics_json.get("block_ggn_error")
             flat["train_loss"] = metrics_json.get("train_loss")
 
             if flat["hessian_error"] is not None:
@@ -125,7 +133,7 @@ def plot_approx_error(
     x_pos = np.arange(n_groups)
 
     for j, method in enumerate(METHODS):
-        key = "hessian_error" if method == "Hessian" else "ggn_error"
+        key = METHOD_KEYS[method]
         values = [float(r[key]) for r in results]  # type: ignore[arg-type]
         offsets = x_pos - group_width / 2 + bar_width * (j + 0.5)
         ax.bar(

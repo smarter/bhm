@@ -2,7 +2,7 @@ import jax
 import jax.flatten_util
 import jax.numpy as jnp
 
-from bhm.curvature import compute_ggn, compute_hessian
+from bhm.curvature import compute_block_ggn, compute_ggn, compute_hessian
 from bhm.evaluate import approximation_error, per_sample_gradients, pseudo_inverse
 from bhm.model import MLP
 
@@ -45,6 +45,41 @@ def test_hessian_differs_from_ggn():
     G = compute_ggn(model, x, y, chunk_size=8)
     diff = jnp.max(jnp.abs(H - G))
     assert diff > 1e-6, f"Hessian and GGN are identical (diff={diff}), expected them to differ"
+
+
+def test_block_ggn_is_block_diagonal():
+    model, x, y = _make_tiny_setup()
+    G = compute_ggn(model, x, y, chunk_size=8)
+    BG = compute_block_ggn(model, x, y, chunk_size=8)
+    # Diagonal blocks should match GGN
+    from bhm.curvature import _get_layer_param_ranges
+
+    ranges = _get_layer_param_ranges(model)
+    for start, end in ranges:
+        assert jnp.allclose(
+            BG[start:end, start:end], G[start:end, start:end], atol=1e-5
+        ), f"Block [{start}:{end}] doesn't match GGN diagonal"
+    # Off-diagonal blocks should be zero
+    for i, (s1, e1) in enumerate(ranges):
+        for j, (s2, e2) in enumerate(ranges):
+            if i != j:
+                assert jnp.allclose(
+                    BG[s1:e1, s2:e2], 0.0, atol=1e-10
+                ), f"Off-diagonal block [{s1}:{e1},{s2}:{e2}] not zero"
+
+
+def test_block_ggn_error_between_ggn_and_kfac():
+    """B-GGN error should be >= GGN error (it's a worse approximation)."""
+    model, x, y = _make_tiny_setup()
+    H = compute_hessian(model, x, y)
+    G = compute_ggn(model, x, y, chunk_size=8)
+    BG = compute_block_ggn(model, x, y, chunk_size=8)
+    grads = per_sample_gradients(model, x, y)
+    G_inv = pseudo_inverse(G)
+    BG_inv = pseudo_inverse(BG)
+    ggn_err = approximation_error(H, G_inv, grads)
+    bg_err = approximation_error(H, BG_inv, grads)
+    assert bg_err >= ggn_err - 1e-4, f"B-GGN error ({bg_err}) < GGN error ({ggn_err})"
 
 
 def test_pseudo_inverse():

@@ -7,6 +7,18 @@ from bhm.model import MLP
 from bhm.train import cross_entropy_loss
 
 
+def _get_layer_param_ranges(model: MLP) -> list[tuple[int, int]]:
+    """Return (start, end) index pairs for each layer's parameters in the flat vector."""
+    ranges = []
+    offset = 0
+    for layer in model.layers:
+        assert layer.bias is not None
+        size = layer.weight.size + layer.bias.size
+        ranges.append((offset, offset + size))
+        offset += size
+    return ranges
+
+
 def compute_hessian(
     model: MLP,
     x: Float[Array, "N 64"],
@@ -81,3 +93,21 @@ def compute_ggn(
 
     G = G / N
     return (G + G.T) / 2
+
+
+def compute_block_ggn(
+    model: MLP,
+    x: Float[Array, "N 64"],
+    y: Int[Array, " N"],
+    *,
+    chunk_size: int = 32,
+) -> Float[Array, "D D"]:
+    """Block-diagonal GGN: extract only the diagonal blocks (one per layer) from the full GGN."""
+    G = compute_ggn(model, x, y, chunk_size=chunk_size)
+    ranges = _get_layer_param_ranges(model)
+    flat_params, _ = jax.flatten_util.ravel_pytree(model)
+    D = flat_params.shape[0]
+    B = jnp.zeros((D, D))
+    for start, end in ranges:
+        B = B.at[start:end, start:end].set(G[start:end, start:end])
+    return B

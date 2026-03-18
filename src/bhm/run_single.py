@@ -24,6 +24,7 @@ def main() -> None:
     metrics = {
         "hessian_error": result.hessian_error,
         "ggn_error": result.ggn_error,
+        "block_ggn_error": result.block_ggn_error,
         "train_loss": result.train_loss,
         "num_params": result.num_params,
     }
