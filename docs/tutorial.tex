@@ -1,0 +1,314 @@
+\documentclass[11pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb,amsfonts}
+\usepackage{bm}
+\usepackage{hyperref}
+\usepackage{booktabs}
+
+\DeclareMathOperator{\diag}{diag}
+\DeclareMathOperator{\tr}{tr}
+\DeclareMathOperator{\softmax}{softmax}
+\DeclareMathOperator{\vect}{vec}
+\newcommand{\R}{\mathbb{R}}
+\newcommand{\E}{\mathbb{E}}
+\newcommand{\kron}{\otimes}
+
+\title{Curvature Approximations for Influence Functions:\\A Tutorial on Hessian, GGN, K-FAC, and EK-FAC}
+\author{}
+\date{}
+
+\begin{document}
+\maketitle
+
+\section{Setup}
+
+Consider a classification network $f(x;\theta)\in\R^C$ with parameters
+$\theta\in\R^D$ trained by minimising the cross-entropy loss over $N$ samples:
+\[
+  J(\theta) = \frac{1}{N}\sum_{i=1}^{N} L(z_i,\theta),
+  \qquad
+  L(z_i,\theta) = -\log \softmax\!\bigl(f(x_i;\theta)\bigr)_{y_i}.
+\]
+Influence functions require solving systems of the form $\mathbf{H}^{-1}v$
+where $\mathbf{H}=\nabla^2_\theta J(\theta^\star)$ is the Hessian at the
+trained parameters. Since $\mathbf{H}$ is $D\times D$ and typically
+ill-conditioned, a chain of progressively coarser approximations is used.
+
+We study five curvature matrices, each approximating $\mathbf{H}$ with
+different fidelity.
+
+\section{The Hessian}
+
+The full Hessian of the empirical risk is
+\[
+  \mathbf{H} = \frac{1}{N}\sum_{i=1}^{N}\nabla^2_\theta L(z_i,\theta).
+\]
+We compute it column-by-column using Hessian--vector products (HVPs).
+A single HVP $\mathbf{H}v$ is obtained by forward-over-reverse
+autodiff: apply \texttt{jax.jvp} to the gradient function.
+We batch $K$ HVPs at a time with standard basis vectors to fill $K$
+rows of~$\mathbf{H}$, iterating in chunks to control memory.
+
+\section{The Generalised Gauss--Newton (GGN)}
+
+Write the network output as $u_i = f(x_i;\theta)$ with Jacobian
+$\mathbf{J}_i = \partial u_i/\partial\theta \in \R^{C\times D}$.
+The Hessian decomposes as $\mathbf{H} = \mathbf{G} + \mathbf{R}$
+where
+\[
+  \mathbf{G}
+  = \frac{1}{N}\sum_{i=1}^{N}
+    \mathbf{J}_i^\top \mathbf{H}_i^{(u)} \mathbf{J}_i,
+  \qquad
+  \mathbf{H}_i^{(u)}
+  = \nabla_u^2\,\phi(u_i,y_i)
+  = \diag(p_i) - p_i p_i^\top,
+\]
+$p_i = \softmax(u_i)$, and the residual $\mathbf{R}$ collects
+second-order parameter non-linearities.
+The GGN is always positive semi-definite (unlike~$\mathbf{H}$) and
+coincides with~$\mathbf{H}$ near convergence where $\mathbf{R}\to 0$.
+
+We compute~$\mathbf{G}$ by forming the per-sample Jacobian
+$\mathbf{J}_i\in\R^{C\times D}$ via \texttt{jax.jacobian}, then
+accumulating $\mathbf{J}_i^\top \mathbf{H}_i^{(u)} \mathbf{J}_i$
+over data chunks.
+
+\section{Block-diagonal GGN (B-GGN)}
+
+Partition parameters by layer:
+$\theta=(\theta_1,\dots,\theta_L)$.  The block-diagonal GGN retains
+only the diagonal blocks of~$\mathbf{G}$:
+\[
+  \mathbf{G}_{\text{block}} = \diag(\mathbf{G}_1,\dots,\mathbf{G}_L),
+  \qquad
+  \mathbf{G}_\ell = \mathbf{G}[\theta_\ell,\theta_\ell].
+\]
+We compute the full GGN and zero out off-diagonal blocks. The
+discarded cross-block terms $\mathbf{G}_{\ell m}$ ($\ell\neq m$)
+quantify how parameter groups jointly affect the output.
+
+\section{K-FAC}
+
+\subsection{Per-layer structure}
+
+For a linear layer~$\ell$ without bias, the pre-activation is
+$s_\ell = W_\ell\, a_{\ell-1}$ where $a_{\ell-1}\in\R^{d_{\text{in}}}$
+is the layer input and $W_\ell\in\R^{d_{\text{out}}\times d_{\text{in}}}$
+is the weight.  The per-sample gradient of the loss with respect to the
+vectorised weight is
+\[
+  g_\ell^{(i)} = \vect\!\Bigl(\frac{\partial L_i}{\partial W_\ell}\Bigr)
+  = \frac{\partial L_i}{\partial s_\ell} \kron a_{\ell-1}^{(i)}
+  = \Delta s_\ell^{(i)} \kron a_{\ell-1}^{(i)},
+\]
+where we use the row-major (C-order) vectorisation convention matching
+JAX's \texttt{ravel}, and $\Delta s_\ell^{(i)} =
+\partial L_i/\partial s_\ell$ is the pre-activation gradient.
+
+\medskip
+\noindent\textbf{Remark on Kronecker ordering.}\quad
+For weights shaped $(d_{\text{out}}, d_{\text{in}})$ with C-order
+flattening, the vectorised gradient is
+$\Delta s \kron a$ (gradient factor first).
+The PyTorch/K-FAC literature uses $(d_{\text{in}}, d_{\text{out}})$
+weights with column-major flattening, giving $a\kron\Delta s$.
+The resulting Kronecker product for the curvature block is
+$\mathbf{S}\kron\mathbf{A}$ (ours) vs.\
+$\mathbf{A}\kron\mathbf{S}$ (literature).
+Both are correct for their respective conventions.
+
+\subsection{The Kronecker factorisation}
+
+K-FAC approximates each layer's curvature block by assuming
+that the input activations $a_{\ell-1}$ and the pre-activation
+gradients $\Delta s_\ell$ are statistically independent across
+samples:
+\[
+  \hat{\mathbf{G}}_\ell
+  = \mathbf{S}_\ell \kron \mathbf{A}_{\ell-1},
+  \qquad
+  \mathbf{A}_{\ell-1} = \frac{1}{N}\sum_i a_i a_i^\top,
+  \quad
+  \mathbf{S}_\ell = \text{(depends on which Fisher)}.
+\]
+
+\subsection{Three Fishers and why they matter}
+\label{sec:three-fishers}
+
+The ``gradient covariance'' $\mathbf{S}_\ell$ can be defined in three
+different ways, leading to different curvature matrices:
+
+\begin{enumerate}
+\item \textbf{Empirical Fisher.}\;
+  Use the actual data labels~$y_i$:
+  \[
+    \mathbf{S}_\ell^{\text{emp}}
+    = \frac{1}{N}\sum_{i=1}^{N}
+      \Delta s_\ell^{(i)}\,\Delta s_\ell^{(i)\top},
+    \qquad
+    \Delta s_\ell^{(i)}
+    = \frac{\partial L(x_i,y_i)}{\partial s_\ell}.
+  \]
+  Each sample contributes a rank-1 outer product to~$\mathbf{S}_\ell$.
+
+\item \textbf{True (real) Fisher.}\;
+  Replace data labels by $\tilde y\sim p(\cdot|x;\theta)$
+  sampled from the model's predictive distribution:
+  \[
+    \mathbf{S}_\ell^{\text{true}}
+    = \frac{1}{N}\sum_{i=1}^{N}
+      \E_{\tilde y\sim p(\cdot|x_i)}
+      \bigl[\Delta s_\ell^{(i,\tilde y)}\,
+             \Delta s_\ell^{(i,\tilde y)\top}\bigr]
+    = \frac{1}{N}\sum_{i=1}^{N}\sum_{c=1}^{C}
+      p_{ic}\;\Delta s_\ell^{(i,c)}\,\Delta s_\ell^{(i,c)\top},
+  \]
+  where $\Delta s_\ell^{(i,c)}$ is the pre-activation gradient when the
+  label is set to class~$c$, and $p_{ic} = p(y{=}c|x_i;\theta)$.
+
+  Each sample now contributes rank up to $C{-}1$ (weighted sum
+  over~$C$ classes).
+
+\item \textbf{GGN-derived.}\;
+  Define $\mathbf{S}_\ell$ from the GGN block using the sub-network
+  Jacobian $\mathbf{B}_\ell = \partial u/\partial s_\ell$:
+  \[
+    \mathbf{S}_\ell^{\text{GGN}}
+    = \frac{1}{N}\sum_{i=1}^{N}
+      \mathbf{B}_{\ell,i}^\top\,\mathbf{H}_i^{(u)}\,\mathbf{B}_{\ell,i}.
+  \]
+\end{enumerate}
+
+\medskip
+\noindent
+\textbf{Key identity.}\;
+For cross-entropy with softmax,
+$\mathbf{S}_\ell^{\text{true}} = \mathbf{S}_\ell^{\text{GGN}}$,
+because
+\[
+  \E_{\tilde y\sim p}\bigl[
+    (p-e_{\tilde y})(p-e_{\tilde y})^\top
+  \bigr]
+  = \diag(p) - pp^\top
+  = \mathbf{H}^{(u)}.
+\]
+This identity does \emph{not} hold for the empirical Fisher, which uses a
+single label~$y_i$ instead of the expectation.
+
+\medskip
+\noindent
+\textbf{Practical consequence.}\;
+At convergence, the model's predictions become confident
+($p\approx e_{y_i}$), so the empirical gradient
+$\Delta s \approx 0$ and $\mathbf{S}^{\text{emp}}\to 0$.  The true
+Fisher / GGN factor $\mathbf{S}^{\text{true}}$ remains
+well-conditioned because the output Hessian
+$\diag(p)-pp^\top$ retains curvature across all $C{-}1$
+non-predicted classes.
+
+In our experiments, using the empirical Fisher caused K-FAC
+approximation errors to explode from ${\sim}10^3$ to ${\sim}10^7$
+at 1000 epochs of training.
+
+\subsection{Implementation: analytic vs.\ Monte Carlo}
+
+There are two ways to compute $\mathbf{S}_\ell^{\text{true}}$:
+
+\begin{description}
+\item[Analytic (our approach).]
+  Compute the sub-network Jacobian
+  $\mathbf{B}_\ell = \partial u/\partial s_\ell$ via
+  \texttt{jax.jacobian}, then form
+  $\mathbf{S}_\ell = \frac{1}{N}\sum_i
+   \mathbf{B}_{\ell,i}^\top\,\mathbf{H}_i^{(u)}\,\mathbf{B}_{\ell,i}$.
+  This is exact (no sampling noise) and natural for small~$C$.
+  The cost is one Jacobian computation per layer.
+
+\item[Monte Carlo (reference implementation).]
+  Sample pseudo-labels $\tilde y_i \sim \text{Cat}(p_i)$, run standard
+  backprop with these labels, and collect the per-layer gradients
+  $\Delta s_\ell^{(i,\tilde y_i)}$ via a \texttt{custom\_vjp} hook.
+  Repeat with $M$ Monte Carlo samples and average.  This is unbiased but
+  noisy; it requires $M$ backward passes but works for any loss function
+  without analytically computing $\mathbf{H}^{(u)}$.
+\end{description}
+
+\section{EK-FAC}
+
+K-FAC uses eigenvalues $\Lambda_{\mathbf{S}}\kron\Lambda_{\mathbf{A}}$
+(products of marginal spectra) which can misrepresent the true curvature.
+EK-FAC keeps the same Kronecker eigenbasis
+$\mathbf{U} = \mathbf{U}_{\mathbf{S}}\kron\mathbf{U}_{\mathbf{A}}$ but
+replaces the eigenvalues with corrected values that match the diagonal
+of the true Fisher / GGN in the Kronecker basis:
+\[
+  s^\star_{jm}
+  = \frac{1}{N}\sum_{i=1}^{N}\sum_{c=1}^{C}
+    p_{ic}\;
+    \bigl(\mathbf{U}_{\mathbf{S}}^\top
+          \Delta s_\ell^{(i,c)}\bigr)_j^2
+    \;\bigl(\mathbf{U}_{\mathbf{A}}^\top a_i\bigr)_m^2.
+\]
+The corrected matrix is
+$\hat{\mathbf{G}}_\ell^{\text{EK}} =
+ \mathbf{U}\,\diag(\vect(\mathbf{S}^\star))\,\mathbf{U}^\top$.
+
+Since $\Delta s_\ell^{(i,c)} = \mathbf{B}_{\ell,i}^\top(p_i - e_c)$,
+we compute the per-class pre-activation gradients from the same
+sub-network Jacobian $\mathbf{B}_\ell$ used in K-FAC.
+
+\section{Pseudo-inverse}
+
+All matrices are inverted via eigendecomposition-based pseudo-inverse.
+For a symmetric $\mathbf{M} = \mathbf{Q}\Lambda\mathbf{Q}^\top$:
+\[
+  \mathbf{M}^\dagger
+  = \mathbf{Q}\,\Lambda^\dagger\,\mathbf{Q}^\top,
+  \qquad
+  [\Lambda^\dagger]_{ii}
+  = \begin{cases}
+      \lambda_i^{-1} & \text{if } |\lambda_i|>\varepsilon,\\
+      0 & \text{otherwise},
+    \end{cases}
+\]
+with $\varepsilon=10^{-4}$.  The eigendecomposition is performed in
+\texttt{float64} (via NumPy) for numerical stability, then cast
+back to \texttt{float32}.
+
+\section{Approximation error metric}
+
+Given test vectors $\{v_i\}$ (per-sample loss gradients), the
+approximation error of a curvature estimate~$\hat{\mathbf{H}}$ is:
+\[
+  \text{Error}(\hat{\mathbf{H}})
+  = \frac{1}{N}\sum_{i=1}^{N}
+    \frac{\|\mathbf{H}\,\hat{\mathbf{H}}^{\dagger}\,v_i - v_i\|^2}
+         {\|v_i\|^2}.
+\]
+If $\hat{\mathbf{H}} = \mathbf{H}$, the error is zero (up to
+numerical precision).  The metric measures how well solving
+$\hat{\mathbf{H}}x = v$ approximates solving $\mathbf{H}x = v$.
+
+\section{Summary of the approximation hierarchy}
+
+\begin{center}
+\begin{tabular}{lll}
+  \toprule
+  \textbf{Method} & \textbf{What it drops} & \textbf{Our computation} \\
+  \midrule
+  Hessian   & (nothing)               & HVPs via \texttt{jax.jvp} of \texttt{jax.grad} \\
+  GGN       & Residual $\mathbf{R}$   & $\mathbf{J}^\top\mathbf{H}^{(u)}\mathbf{J}$ via \texttt{jax.jacobian} \\
+  B-GGN     & Cross-layer blocks      & Diagonal blocks of GGN \\
+  EK-FAC    & Off-diagonal in Kron.\ basis & Corrected eigenvalues in $\mathbf{U}_S\kron\mathbf{U}_A$ \\
+  K-FAC     & Eigenvalue correction   & $\mathbf{S}\kron\mathbf{A}$ with marginal spectra \\
+  \bottomrule
+\end{tabular}
+\end{center}
+
+Each step discards information: the residual (non-linearity), cross-layer
+coupling, and within-block Kronecker structure.  The paper's central
+finding is that better curvature fidelity consistently improves influence
+function quality.
+
+\end{document}
