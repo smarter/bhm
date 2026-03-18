@@ -6,9 +6,13 @@ import jax.flatten_util
 from bhm.curvature import (
     compute_block_ggn,
     compute_ekfac,
+    compute_eshampoo,
+    compute_etkfac,
     compute_ggn,
     compute_hessian,
     compute_kfac,
+    compute_shampoo,
+    compute_tkfac,
 )
 from bhm.data import load_digits_data
 from bhm.evaluate import approximation_error, per_sample_gradients, pseudo_inverse
@@ -35,6 +39,10 @@ class ExperimentResult:
     block_ggn_error: float
     kfac_error: float
     ekfac_error: float
+    shampoo_error: float
+    eshampoo_error: float
+    tkfac_error: float
+    etkfac_error: float
     train_loss: float
     num_params: int
 
@@ -78,6 +86,18 @@ def run_experiment(config: ExperimentConfig) -> ExperimentResult:
     print("  Computing EK-FAC...")
     EKF = compute_ekfac(model, data.x_train, data.y_train)
 
+    print("  Computing Shampoo...")
+    SH = compute_shampoo(model, data.x_train, data.y_train)
+
+    print("  Computing EShampoo...")
+    ESH = compute_eshampoo(model, data.x_train, data.y_train)
+
+    print("  Computing TKFAC...")
+    TKF = compute_tkfac(model, data.x_train, data.y_train)
+
+    print("  Computing ETKFAC...")
+    ETKF = compute_etkfac(model, data.x_train, data.y_train)
+
     print("  Computing per-sample gradients...")
     grads = per_sample_gradients(model, data.x_train, data.y_train)
 
@@ -87,6 +107,10 @@ def run_experiment(config: ExperimentConfig) -> ExperimentResult:
     BG_inv = pseudo_inverse(BG)
     KF_inv = pseudo_inverse(KF)
     EKF_inv = pseudo_inverse(EKF)
+    SH_inv = pseudo_inverse(SH)
+    ESH_inv = pseudo_inverse(ESH)
+    TKF_inv = pseudo_inverse(TKF)
+    ETKF_inv = pseudo_inverse(ETKF)
 
     print("  Computing approximation errors...")
     hessian_err = approximation_error(H, H_inv, grads)
@@ -94,6 +118,10 @@ def run_experiment(config: ExperimentConfig) -> ExperimentResult:
     block_ggn_err = approximation_error(H, BG_inv, grads)
     kfac_err = approximation_error(H, KF_inv, grads)
     ekfac_err = approximation_error(H, EKF_inv, grads)
+    shampoo_err = approximation_error(H, SH_inv, grads)
+    eshampoo_err = approximation_error(H, ESH_inv, grads)
+    tkfac_err = approximation_error(H, TKF_inv, grads)
+    etkfac_err = approximation_error(H, ETKF_inv, grads)
 
     return ExperimentResult(
         config=config,
@@ -102,6 +130,10 @@ def run_experiment(config: ExperimentConfig) -> ExperimentResult:
         block_ggn_error=block_ggn_err,
         kfac_error=kfac_err,
         ekfac_error=ekfac_err,
+        shampoo_error=shampoo_err,
+        eshampoo_error=eshampoo_err,
+        tkfac_error=tkfac_err,
+        etkfac_error=etkfac_err,
         train_loss=train_loss,
         num_params=num_params,
     )

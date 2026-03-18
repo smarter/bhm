@@ -11,18 +11,26 @@ COLORS = {
     "Hessian": (204 / 255, 57 / 255, 42 / 255),
     "GGN": (79 / 255, 155 / 255, 143 / 255),
     "B-GGN": (217 / 255, 116 / 255, 89 / 255),
+    "EShampoo": (51 / 255, 102 / 255, 153 / 255),
     "EK-FAC": (228 / 255, 197 / 255, 119 / 255),
+    "ETKFAC": (204 / 255, 153 / 255, 102 / 255),
+    "Shampoo": (102 / 255, 153 / 255, 204 / 255),
     "K-FAC": (155 / 255, 106 / 255, 145 / 255),
+    "TKFAC": (153 / 255, 102 / 255, 51 / 255),
 }
 
-METHODS = ["Hessian", "GGN", "B-GGN", "EK-FAC", "K-FAC"]
+METHODS = ["Hessian", "GGN", "B-GGN", "EShampoo", "EK-FAC", "ETKFAC", "Shampoo", "K-FAC", "TKFAC"]
 
 METHOD_KEYS = {
     "Hessian": "hessian_error",
     "GGN": "ggn_error",
     "B-GGN": "block_ggn_error",
+    "EShampoo": "eshampoo_error",
     "EK-FAC": "ekfac_error",
+    "ETKFAC": "etkfac_error",
+    "Shampoo": "shampoo_error",
     "K-FAC": "kfac_error",
+    "TKFAC": "tkfac_error",
 }
 
 SWEEPS: dict[str, dict[str, object]] = {
@@ -125,10 +133,10 @@ def make_figure(
     x_values = [r[x_key] for r in results]
     x_labels = [f"{title_var} {v}" for v in x_values]
 
-    fig, ax = plt.subplots(figsize=(7.0, 3.5))
+    fig, ax = plt.subplots(figsize=(9.0, 3.5))
 
     n_groups = len(x_values)
-    bar_width = 0.13
+    bar_width = 0.08
     n_methods = len(METHODS)
     group_width = n_methods * bar_width
     x_pos = np.arange(n_groups)
